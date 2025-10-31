@@ -37,6 +37,11 @@ public class BitGetWS extends WebSocketClient {
     private boolean needToRestart = false;
     private String stopId;
     private String side;
+    
+    // Reconnection backoff state
+    private int reconnectAttempts = 0;
+    private static final int MAX_RECONNECT_DELAY = 60; // Max 60 seconds
+    private static final int INITIAL_RECONNECT_DELAY = 1; // Start with 1 second
 
     public Map<String, PositionEvent> getEvents() {
         return events;
@@ -212,6 +217,7 @@ public class BitGetWS extends WebSocketClient {
         log.info("Connected to BitGet Futures WebSocket");
         synchronized (connectionLock) {
             isConnected = true;
+            reconnectAttempts = 0; // Reset reconnect attempts on successful connection
             connectionLock.notifyAll();
         }
         authenticate();
@@ -246,10 +252,13 @@ public class BitGetWS extends WebSocketClient {
             connectionLock.notifyAll();
         }
 
-        // Автопереподключение (если не мы сами закрыли)
+        // Auto-reconnect with exponential backoff (if not normal closure)
         if (code != 1000 && !isReconnecting) {
-            log.info("Try reconnect");
-            reconnect();
+            log.info("Abnormal closure, scheduling reconnect with backoff");
+            reconnectWithBackoff();
+        } else if (code == 1000) {
+            log.info("Normal closure initiated by client");
+            reconnectAttempts = 0; // Reset attempts on normal close
         }
     }
 
@@ -295,36 +304,61 @@ public class BitGetWS extends WebSocketClient {
     }
 
     /**
-     * Автопереподключение
+     * Reconnect with exponential backoff
      */
-    @Override
-    public void reconnect() {
+    private void reconnectWithBackoff() {
         new Thread(() -> {
             isReconnecting = true;
             try {
-                System.out.println("Attempting to reconnect...");
+                // Calculate delay with exponential backoff
+                int delay = Math.min(INITIAL_RECONNECT_DELAY * (int) Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+                reconnectAttempts++;
+                
+                log.info("Scheduling reconnection attempt {} in {} seconds...", reconnectAttempts, delay);
+                Thread.sleep(delay * 1000L);
+                
+                log.info("Attempting to reconnect (attempt {})...", reconnectAttempts);
 
                 if (reconnectBlocking()) {
                     log.info("Reconnection successful");
                     synchronized (connectionLock) {
                         isConnected = true;
+                        reconnectAttempts = 0; // Reset on success
                         connectionLock.notifyAll();
                     }
 
-
-                    // Повторная аутентификация
+                    // Re-authenticate
                     authenticate();
                     waitForAuthentication();
                     sendPong();
 
                     subscribeToChannels();
+                } else {
+                    log.warn("Reconnection attempt {} failed", reconnectAttempts);
+                    if (reconnectAttempts < 10) {
+                        reconnectWithBackoff(); // Try again
+                    } else {
+                        log.error("Max reconnection attempts reached. Manual intervention may be required.");
+                        reconnectAttempts = 0; // Reset for future attempts
+                    }
                 }
             } catch (Exception e) {
-                log.error("Reconnection failed: ", e);
+                log.error("Reconnection attempt {} failed: {}", reconnectAttempts, e.getMessage());
+                if (reconnectAttempts < 10) {
+                    reconnectWithBackoff(); // Try again
+                }
             } finally {
                 isReconnecting = false;
             }
         }).start();
+    }
+
+    /**
+     * Автопереподключение (legacy method, now calls reconnectWithBackoff)
+     */
+    @Override
+    public void reconnect() {
+        reconnectWithBackoff();
     }
 
     private void authenticate() {

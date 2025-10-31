@@ -29,8 +29,14 @@ public class FuturesWsPrivateClient {
     // Атомарные флаги для управления состоянием
     private final AtomicBoolean active = new AtomicBoolean(false);
     private final AtomicBoolean reconnecting = new AtomicBoolean(false);
+    
+    // Reconnection backoff state
+    private int reconnectAttempts = 0;
+    private static final int MAX_RECONNECT_DELAY = 60; // Max 60 seconds between reconnects
+    private static final int INITIAL_RECONNECT_DELAY = 1; // Start with 1 second
 
     private ScheduledExecutorService reconnectExecutor;
+    private Timer pingTimer;
 
     // Конструкторы с обратной совместимостью
     public FuturesWsPrivateClient(String apiKey, String apiSecret) {
@@ -71,6 +77,7 @@ public class FuturesWsPrivateClient {
                 log.info("WebSocket connection opened successfully");
                 active.set(true);
                 reconnecting.set(false);
+                reconnectAttempts = 0; // Reset reconnect attempts on successful connection
             }
 
             @Override
@@ -114,24 +121,26 @@ public class FuturesWsPrivateClient {
                 log.info("WebSocket closed - code: {}, reason: {}", code, reason);
                 active.set(false);
                 if (code != 1000) {
-                    log.info("Try reconnect");
+                    log.info("Abnormal closure, scheduling reconnect with backoff");
+                    scheduleReconnect();
                 } else {
-                    log.info("Все ок, это мы закрыли соеденение с Bitunix.");
+                    log.info("Normal closure initiated by client");
+                    reconnectAttempts = 0; // Reset attempts on normal close
                 }
-                scheduleReconnect();
             }
 
             @Override
             public void onFailure(@NotNull WebSocket webSocket, @NotNull Throwable t, @Nullable Response response) {
-                log.warn("WebSocket connection failure", t);
+                log.warn("WebSocket connection failure: {}", t.getMessage());
                 active.set(false);
                 scheduleReconnect();
             }
         };
 
-        Thread.startVirtualThread(() -> {
-            Timer ping = new Timer();
-            ping.scheduleAtFixedRate(new TimerTask() {
+        // Initialize ping timer if not already created
+        if (pingTimer == null) {
+            pingTimer = new Timer("BitunixWS-Ping", true);
+            pingTimer.scheduleAtFixedRate(new TimerTask() {
                 @Override
                 public void run() {
                     if (isActive()) {
@@ -139,7 +148,7 @@ public class FuturesWsPrivateClient {
                     }
                 }
             }, 1000, 10000);
-        });
+        }
 
         // Создаем запрос для WebSocket соединения
         Request.Builder request = new Request.Builder().url("wss://fapi.bitunix.com/private/");
@@ -191,7 +200,7 @@ public class FuturesWsPrivateClient {
     }
 
     /**
-     * Планирует переподключение с задержкой
+     * Планирует переподключение с задержкой и экспоненциальным откатом
      */
     private void scheduleReconnect() {
         if (!reconnecting.compareAndSet(false, true)) {
@@ -199,7 +208,11 @@ public class FuturesWsPrivateClient {
             return; // Уже в процессе реконнекта
         }
 
-        log.info("Scheduling reconnection...");
+        // Calculate delay with exponential backoff
+        int delay = Math.min(INITIAL_RECONNECT_DELAY * (int) Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+        reconnectAttempts++;
+        
+        log.info("Scheduling reconnection attempt {} in {} seconds...", reconnectAttempts, delay);
 
         // Останавливаем предыдущий планировщик реконнекта
         if (reconnectExecutor != null) {
@@ -209,31 +222,22 @@ public class FuturesWsPrivateClient {
         reconnectExecutor = Executors.newSingleThreadScheduledExecutor();
         reconnectExecutor.schedule(() -> {
             try {
-                log.info("Attempting to reconnect...");
+                log.info("Attempting to reconnect (attempt {})...", reconnectAttempts);
                 reconnecting.set(false);
                 reconnect();
             } catch (Exception e) {
-                log.error("Reconnection attempt failed", e);
+                log.error("Reconnection attempt {} failed: {}", reconnectAttempts, e.getMessage());
                 reconnecting.set(false);
-                // Планируем следующую попытку через 10 секунд
-                scheduleDelayedReconnect(0);
+                
+                // Schedule next attempt if we haven't exceeded reasonable limits
+                if (reconnectAttempts < 10) {
+                    scheduleReconnect();
+                } else {
+                    log.error("Max reconnection attempts reached. Manual intervention may be required.");
+                    reconnectAttempts = 0; // Reset for future attempts
+                }
             }
-        }, 0, TimeUnit.SECONDS);
-    }
-
-    /**
-     * Планирует переподключение с указанной задержкой
-     */
-    private void scheduleDelayedReconnect(int delaySeconds) {
-        if (reconnectExecutor != null) {
-            reconnectExecutor.shutdownNow();
-        }
-
-        reconnectExecutor = Executors.newSingleThreadScheduledExecutor();
-        reconnectExecutor.schedule(() -> {
-            reconnecting.set(false);
-            reconnect();
-        }, delaySeconds, TimeUnit.SECONDS);
+        }, delay, TimeUnit.SECONDS);
     }
 
     /**
@@ -256,6 +260,7 @@ public class FuturesWsPrivateClient {
         // Создаем новое соединение
         try {
             this.webSocket = okHttpClient.newWebSocket(wsRequest, webSocketListener);
+            log.info("New WebSocket connection initiated");
         } catch (Exception e) {
             log.error("Failed to create new WebSocket connection", e);
             scheduleReconnect();
@@ -269,10 +274,16 @@ public class FuturesWsPrivateClient {
         log.info("Disconnecting WebSocket...");
         active.set(false);
         reconnecting.set(false);
+        reconnectAttempts = 0; // Reset reconnect attempts
 
         if (reconnectExecutor != null) {
             reconnectExecutor.shutdownNow();
             reconnectExecutor = null;
+        }
+        
+        if (pingTimer != null) {
+            pingTimer.cancel();
+            pingTimer = null;
         }
 
         if (webSocket != null) {

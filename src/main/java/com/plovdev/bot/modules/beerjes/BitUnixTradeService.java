@@ -242,33 +242,116 @@ public class BitUnixTradeService implements TradeService {
         printPart("updating stop-loss");
         System.out.println("\n\n");
 
-        try {
-            Map<String, Object> data = new HashMap<>();
-            data.put("symbol", pair);
-            data.put("positionId", positionId);
-            data.put("slPrice", newStop.toPlainString());
-
-            String payload = objectMapper.writeValueAsString(data);
-            custom.warn(payload);
-
-            String response = postToBitUnix("/api/v1/futures/tpsl/position/modify_order", user, payload);
-            logger.info("\n\n\nBitunix stop traling response for user: {}, body: {}\n\n\n", user.getTgName(), response);
-            // 4. Парсим ответ
-            JsonNode root = objectMapper.readTree(response);
-            if (!validateJsonResopnse(response)) {
-                logger.warn("Stop loss not trailing");
-            } else {
-                String oId = root.path("data").path("orderId").asText();
-                logger.info("Stop loss trailing success: {}", oId);
-
-                return OrderResult.ok("Stop loss trailed", oId, pair);
-            }
-
-        } catch (Exception e) {
-            logger.error("Stop loss trailing failed for symbol {}: {}", pair, e.getMessage());
-            return OrderResult.error(e.getMessage(), "none", pair);
+        // Get position to determine side
+        List<Position> positions = getPositions(user).stream()
+            .filter(p -> p.getPosId().equals(positionId) || p.getSymbol().equals(pair))
+            .toList();
+        
+        if (positions.isEmpty()) {
+            logger.error("Position not found for updateStopLoss: positionId={}, symbol={}", positionId, pair);
+            return OrderResult.error("Position not found", "none", pair);
         }
-        return OrderResult.no();
+        
+        Position position = positions.getFirst();
+        String holdSide = position.getHoldSide();
+        
+        // Validate SL price before attempting to update
+        if (!validateStopLossPrice(newStop, pair, holdSide)) {
+            logger.error("Stop loss price validation failed for update. Attempting adjustment...");
+            
+            // Try to adjust SL price slightly to make it valid
+            Ticker ticker = getTicker(pair);
+            BigDecimal adjustment = ticker.getLastPrice().multiply(new BigDecimal("0.001")); // 0.1% adjustment
+            
+            if (holdSide.equalsIgnoreCase("LONG") || holdSide.equalsIgnoreCase("BUY")) {
+                newStop = ticker.getLastPrice().subtract(adjustment);
+            } else {
+                newStop = ticker.getLastPrice().add(adjustment);
+            }
+            
+            logger.info("Adjusted SL price for update to: {}", newStop);
+        }
+
+        // Retry logic with exponential backoff
+        int maxRetries = 3;
+        int retryDelay = 500; // Start with 500ms
+        
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                if (attempt > 0) {
+                    logger.info("Retry attempt {} for updating stop loss", attempt + 1);
+                    Thread.sleep(retryDelay);
+                    retryDelay *= 2; // Exponential backoff
+                    
+                    // Re-validate with fresh market data
+                    Ticker freshTicker = getTicker(pair);
+                    logger.info("Fresh market data - MarkPrice: {}, LastPrice: {}", 
+                        freshTicker.getMarkPrice(), freshTicker.getLastPrice());
+                }
+                
+                Map<String, Object> data = new HashMap<>();
+                data.put("symbol", pair);
+                data.put("positionId", positionId);
+                data.put("slPrice", newStop.toPlainString());
+
+                String payload = objectMapper.writeValueAsString(data);
+                custom.warn(payload);
+
+                String response = postToBitUnix("/api/v1/futures/tpsl/position/modify_order", user, payload);
+                logger.info("\n\n\nBitunix stop traling response for user: {}, body: {}\n\n\n", user.getTgName(), response);
+                
+                // Parse response
+                JsonNode root = objectMapper.readTree(response);
+                
+                // Check for specific error codes
+                if (root.has("code") && (root.get("code").asInt() == 30030 || 
+                    root.get("code").asInt() == 30028 || root.get("code").asInt() == 30029)) {
+                    int errorCode = root.get("code").asInt();
+                    logger.warn("Error {} - SL modification failed on attempt {}: {}", 
+                        errorCode, attempt + 1, root.path("msg").asText());
+                    
+                    if (attempt < maxRetries - 1) {
+                        // Adjust price for next retry
+                        Ticker retryTicker = getTicker(pair);
+                        BigDecimal buffer = retryTicker.getLastPrice().multiply(new BigDecimal("0.002")); // Increase buffer
+                        
+                        if (holdSide.equalsIgnoreCase("LONG") || holdSide.equalsIgnoreCase("BUY")) {
+                            newStop = retryTicker.getLastPrice().subtract(buffer);
+                        } else {
+                            newStop = retryTicker.getLastPrice().add(buffer);
+                        }
+                        
+                        logger.info("Adjusted SL price for retry: {}", newStop);
+                        continue; // Retry
+                    }
+                }
+                
+                if (!validateJsonResopnse(response)) {
+                    logger.warn("Stop loss not trailing");
+                    if (attempt == maxRetries - 1) {
+                        return OrderResult.error("Failed after " + maxRetries + " attempts", "none", pair);
+                    }
+                    continue; // Retry
+                } else {
+                    String oId = root.path("data").path("orderId").asText();
+                    logger.info("Stop loss trailing success: {}", oId);
+
+                    return OrderResult.ok("Stop loss trailed", oId, pair);
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.error("Stop loss update interrupted: {}", e.getMessage());
+                return OrderResult.error("Interrupted", "none", pair);
+            } catch (Exception e) {
+                logger.error("Stop loss trailing failed on attempt {} for symbol {}: {}", attempt + 1, pair, e.getMessage());
+                if (attempt == maxRetries - 1) {
+                    return OrderResult.error(e.getMessage(), "none", pair);
+                }
+            }
+        }
+        
+        return OrderResult.error("Failed after all retry attempts", "none", pair);
     }
 
     public void printPart(String word, Object... objects) {
@@ -569,36 +652,106 @@ public class BitUnixTradeService implements TradeService {
         custom.info("StopLoss: {}, holdSide: {}, symbol: {}", stopLoss, position.getHoldSide(), position.getSymbol());
 
         String pair = position.getSymbol();
+        BigDecimal slPrice = new BigDecimal(stopLoss);
 
-        try {
-            Map<String, Object> data = new HashMap<>();
-            data.put("symbol", pair);
-            data.put("positionId", position.getPosId());
-            data.put("slPrice", stopLoss);
-
-            String payload = objectMapper.writeValueAsString(data);
-            logger.info("Payload formed: {}", payload);
-
-            String response = postToBitUnix("/api/v1/futures/tpsl/position/place_order", user, payload);
-            custom.warn(response);
-            // 4. Парсим ответ
-            JsonNode root = objectMapper.readTree(response);
-            if (!validateJsonResopnse(response)) {
-                logger.warn("Stop loss not placed");
+        // Validate SL price before attempting to place order
+        if (!validateStopLossPrice(slPrice, pair, position.getHoldSide())) {
+            logger.error("Stop loss price validation failed before API call. Attempting adjustment...");
+            
+            // Try to adjust SL price slightly to make it valid
+            Ticker ticker = getTicker(pair);
+            BigDecimal adjustment = ticker.getLastPrice().multiply(new BigDecimal("0.001")); // 0.1% adjustment
+            
+            if (position.getHoldSide().equalsIgnoreCase("LONG") || position.getHoldSide().equalsIgnoreCase("BUY")) {
+                slPrice = ticker.getLastPrice().subtract(adjustment);
             } else {
-                String oId = root.path("data").path("orderId").asText();
-                context.setStopLossId(position.getPosId());
-                logger.info("Stop loss placed success: {}", oId);
-
-                return OrderResult.ok("Stoploss placed", oId, pair);
+                slPrice = ticker.getLastPrice().add(adjustment);
             }
-
-        } catch (Exception e) {
-            logger.error("Stop loss failed for symbol {}: {}", pair, e.getMessage());
-            return OrderResult.error(e.getMessage(), "none", pair);
+            
+            logger.info("Adjusted SL price from {} to {}", stopLoss, slPrice);
         }
+
+        // Retry logic with exponential backoff
+        int maxRetries = 3;
+        int retryDelay = 500; // Start with 500ms
+        
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                if (attempt > 0) {
+                    logger.info("Retry attempt {} for placing stop loss", attempt + 1);
+                    Thread.sleep(retryDelay);
+                    retryDelay *= 2; // Exponential backoff
+                    
+                    // Re-validate with fresh market data
+                    Ticker freshTicker = getTicker(pair);
+                    logger.info("Fresh market data - MarkPrice: {}, LastPrice: {}", 
+                        freshTicker.getMarkPrice(), freshTicker.getLastPrice());
+                }
+                
+                Map<String, Object> data = new HashMap<>();
+                data.put("symbol", pair);
+                data.put("positionId", position.getPosId());
+                data.put("slPrice", slPrice.toPlainString());
+
+                String payload = objectMapper.writeValueAsString(data);
+                logger.info("Payload formed: {}", payload);
+
+                String response = postToBitUnix("/api/v1/futures/tpsl/position/place_order", user, payload);
+                custom.warn(response);
+                
+                // Parse response
+                JsonNode root = objectMapper.readTree(response);
+                
+                // Check for specific error codes
+                if (root.has("code") && root.get("code").asInt() == 30030) {
+                    logger.warn("Error 30030 - SL price validation failed on attempt {}: {}", 
+                        attempt + 1, root.path("msg").asText());
+                    
+                    if (attempt < maxRetries - 1) {
+                        // Adjust price for next retry
+                        Ticker retryTicker = getTicker(pair);
+                        BigDecimal buffer = retryTicker.getLastPrice().multiply(new BigDecimal("0.002")); // Increase buffer
+                        
+                        if (position.getHoldSide().equalsIgnoreCase("LONG") || position.getHoldSide().equalsIgnoreCase("BUY")) {
+                            slPrice = retryTicker.getLastPrice().subtract(buffer);
+                        } else {
+                            slPrice = retryTicker.getLastPrice().add(buffer);
+                        }
+                        
+                        logger.info("Adjusted SL price for retry: {}", slPrice);
+                        continue; // Retry
+                    }
+                }
+                
+                if (!validateJsonResopnse(response)) {
+                    logger.warn("Stop loss not placed - response validation failed");
+                    if (attempt == maxRetries - 1) {
+                        return OrderResult.error("Failed after " + maxRetries + " attempts", "none", pair);
+                    }
+                    continue; // Retry
+                } else {
+                    String oId = root.path("data").path("orderId").asText();
+                    context.setStopLossId(position.getPosId());
+                    logger.info("Stop loss placed success: {}", oId);
+
+                    custom.blue("---------------------------PLACED STOP-LOSS--------------------------------");
+                    return OrderResult.ok("Stoploss placed", oId, pair);
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.error("Stop loss placement interrupted: {}", e.getMessage());
+                return OrderResult.error("Interrupted", "none", pair);
+            } catch (Exception e) {
+                logger.error("Stop loss failed on attempt {} for symbol {}: {}", attempt + 1, pair, e.getMessage());
+                if (attempt == maxRetries - 1) {
+                    return OrderResult.error(e.getMessage(), "none", pair);
+                }
+            }
+        }
+        
         custom.blue("---------------------------PLACED STOP-LOSS--------------------------------");
-        return OrderResult.no();
+        return OrderResult.error("Failed after all retry attempts", "none", pair);
     }
 
     @Override
@@ -1249,6 +1402,80 @@ public class BitUnixTradeService implements TradeService {
         }
 
         return tickers;
+    }
+
+    /**
+     * Gets ticker data for a specific symbol, including mark price and last price
+     * @param symbol The trading pair symbol
+     * @return Ticker object with current market data
+     */
+    public Ticker getTicker(String symbol) {
+        Request request = new Request.Builder()
+                .url(BITUNIX_API_BASE_URL + "/api/v1/futures/market/tickers")
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            String responseBody = Objects.requireNonNull(response.body()).string();
+            JSONObject ret = new JSONObject(responseBody);
+            JSONArray data = ret.getJSONArray("data");
+
+            for (int i = 0; i < data.length(); i++) {
+                JSONObject ticker = data.getJSONObject(i);
+                if (ticker.getString("symbol").equals(symbol)) {
+                    return new Ticker(
+                        symbol,
+                        new BigDecimal(ticker.optString("lastPrice", "0.0")),
+                        new BigDecimal(ticker.optString("markPrice", "0.0"))
+                    );
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error fetching ticker for symbol {}: {}", symbol, e.getMessage());
+        }
+        
+        // Return empty ticker with zero prices if not found
+        return new Ticker(symbol, BigDecimal.ZERO, BigDecimal.ZERO);
+    }
+
+    /**
+     * Validates stop loss price against current market prices
+     * @param slPrice The stop loss price to validate
+     * @param symbol The trading pair symbol
+     * @param holdSide Position side (LONG/BUY or SHORT/SELL)
+     * @return true if SL price is valid, false otherwise
+     */
+    private boolean validateStopLossPrice(BigDecimal slPrice, String symbol, String holdSide) {
+        try {
+            Ticker ticker = getTicker(symbol);
+            BigDecimal markPrice = ticker.getMarkPrice();
+            BigDecimal lastPrice = ticker.getLastPrice();
+            
+            logger.info("SL Validation - Symbol: {}, Side: {}, SL: {}, MarkPrice: {}, LastPrice: {}", 
+                symbol, holdSide, slPrice, markPrice, lastPrice);
+            
+            // For LONG positions, SL must be below current price
+            if (holdSide.equalsIgnoreCase("LONG") || holdSide.equalsIgnoreCase("BUY")) {
+                boolean valid = slPrice.compareTo(lastPrice) < 0;
+                if (!valid) {
+                    logger.warn("Invalid SL for LONG: SL {} must be less than lastPrice {}", slPrice, lastPrice);
+                }
+                return valid;
+            } 
+            // For SHORT positions, SL must be above current price  
+            else if (holdSide.equalsIgnoreCase("SHORT") || holdSide.equalsIgnoreCase("SELL")) {
+                boolean valid = slPrice.compareTo(lastPrice) > 0;
+                if (!valid) {
+                    logger.warn("Invalid SL for SHORT: SL {} must be greater than lastPrice {}", slPrice, lastPrice);
+                }
+                return valid;
+            }
+            
+            logger.warn("Unknown position side: {}", holdSide);
+            return false;
+        } catch (Exception e) {
+            logger.error("Error validating SL price: {}", e.getMessage());
+            return false;
+        }
     }
 
     @Override
