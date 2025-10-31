@@ -57,15 +57,20 @@ public class BitGetTakesSetuper {
     public void manageTakesInMonitor(BitGetWS ws, String symbol, UserEntity user, List<Map<String, String>> orders, String stopLossId, List<TakeProfitLevel> tpLevels, SymbolInfo info, BigDecimal positionSize, String direction) {
         TypeValueSwitcher<Boolean> isOrdered = new TypeValueSwitcher<>(false);
         List<OrderResult> ids = new ArrayList<>(service.placeOrders(user, symbol, orders).stream().filter(OrderResult::succes).toList());
-        System.out.println(ids);
+        logger.info("(BitGet) TP orders placed: {}", ids);
 
         TakeProfitLevel firstLlevel = tpLevels.getFirst();
         ws.addOrderListener(symbol, inputOrder -> {
             String posSide = inputOrder.getPosSide();
             String tradeSide = inputOrder.getTradeSide();
             String orderId = inputOrder.getOrderId();
+            String orderState = inputOrder.getState();
+            
+            logger.info("(BitGet) Order event received - Symbol: {}, OrderId: {}, PosSide: {}, TradeSide: {}, State: {}", 
+                symbol, orderId, posSide, tradeSide, orderState);
 
             if (tradeSide.equalsIgnoreCase("open")) {
+                logger.info("(BitGet) Open order detected, re-adjusting TP volumes");
                 Position position = service.getPositions(user).stream().filter(p -> p.getSymbol().equals(symbol) && p.getHoldSide().equalsIgnoreCase(direction)).toList().getFirst();
                 List<TakeProfitLevel> newTakes = BeerjUtils.reAdjustTakeProfits(position.getTotal(), tpLevels, info, service.getEntryPrice(symbol), direction);
                 List<Order> orderList = service.getOrders(user).stream().filter(o -> o.getSymbol().equals(symbol) && o.getTradeSide().equalsIgnoreCase("close")).toList();
@@ -74,7 +79,7 @@ public class BitGetTakesSetuper {
                     Order o = orderList.get(i);
                     TakeProfitLevel level = newTakes.get(i);
                     Map<String, String> payload = new HashMap<>();
-                    System.out.println(o.getOrderId());
+                    logger.info("(BitGet) Modifying TP order: {}", o.getOrderId());
                     payload.put("orderId", o.getOrderId());
                     payload.put("symbol", symbol);
                     payload.put("productType", "USDT-FUTURES");
@@ -87,50 +92,57 @@ public class BitGetTakesSetuper {
                 }
             }
 
-            System.out.println(isOrdered.getT() + " - isOrdered(BitGet)");
+            logger.info("(BitGet) isOrdered status: {}", isOrdered.getT());
             if (!isOrdered.getT()) {
                 if (inputOrder.getState().equalsIgnoreCase("triggered")) {
+                    logger.info("(BitGet) Order triggered, closing WebSocket");
                     ws.close();
                 }
 
-                if (isTakeHit(inputOrder, tpLevels, ids)) {
+                boolean isTpHit = isTakeHit(inputOrder, tpLevels, ids);
+                logger.info("(BitGet) Is first TP hit? {}", isTpHit);
+                
+                if (isTpHit) {
                     try {
-                        logger.info("(BitGet)Fisrt take-profit(id: {}) is hit!", orderId);
+                        logger.info("(BitGet) First take-profit (id: {}) HIT! Starting trailing process", orderId);
                         List<Order> ordersList = service.getOrders(user);
                         List<Order> toCancel = new ArrayList<>();
 
                         for (Order order : ordersList) {
-                            custom.blue("(BitGet)Order to cancel by first tp: symbol: {}, tradeSide: {}", order.getSymbol(), order.getTradeSide());
+                            logger.info("(BitGet) Checking order to cancel: symbol={}, tradeSide={}", order.getSymbol(), order.getTradeSide());
                             if (order.getSymbol().equals(symbol) && order.getTradeSide().equalsIgnoreCase("open")) {
-                                custom.info("(BitGet)To cancel added a new order: {}", order);
+                                logger.info("(BitGet) Adding order to cancel list: {}", order);
                                 toCancel.add(order);
                             }
                         }
-                        custom.info("(BitGet)Order to cancel by first take: {}", toCancel);
+                        logger.info("(BitGet) Orders to cancel by first take: {}", toCancel);
                         for (Order order : toCancel) {
                             service.closeOrder(user, order);
                         }
                         //---------------------------------------LIMITS CANCELED------------------------------------------\\
                         isOrdered.setT(true);
                         if (trigger.isTakeVariant()) {
-                            System.out.println("(BitGet)STOP LOSS before trailing: " + stopLossId);
+                            logger.info("(BitGet) Trigger is TAKE variant. Stop Loss ID before trailing: {}", stopLossId);
                             OrderResult stopOrder = trailer.trailStopByFirstTakeHit(user, symbol, posSide, stopLossId, info.getPricePlace());
-                            System.out.println("(BitGet)Stop order: " + stopOrder);
+                            logger.info("(BitGet) Stop trailing result: {}", stopOrder);
                             if (stopOrder.succes()) {
                                 ws.close();
-                                logger.info("Stop loss was trailing success");
+                                logger.info("(BitGet) Stop loss was trailed successfully");
                             } else {
+                                logger.warn("(BitGet) Stop loss trailing failed, attempting fallback");
                                 isOrdered.setT(false);
                                 trigger.setTakeToTrailNumber(trigger.getTakeToTrailNumber()+1);
                                 BigDecimal oldPercent = trigger.getStopInProfitPercent();
                                 trigger.setTriggerProfitPercent(new BigDecimal("0.0"));
                                 OrderResult stopOrderAgain = trailer.trailStopByFirstTakeHit(user, symbol, posSide, stopLossId, info.getPricePlace());
-                                System.out.println("(BitGet)Again place stop order: " + stopOrderAgain);
+                                logger.info("(BitGet) Fallback stop trailing result: {}", stopOrderAgain);
                                 trigger.setTriggerProfitPercent(oldPercent);
                             }
+                        } else {
+                            logger.info("(BitGet) Trigger is NOT TAKE variant, skipping SL trailing");
                         }
                     } catch (Exception e) {
-                        logger.info("(BitGet)Fisrt TP hit error: ", e);
+                        logger.error("(BitGet) Error during first TP hit processing: ", e);
                     }
                 }
             }
