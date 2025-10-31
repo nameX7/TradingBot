@@ -926,33 +926,118 @@ public class BitGetTradeService implements TradeService {
     }
 
     public OrderResult updateStopLoss(UserEntity user, String orderId, String symbol, BigDecimal newStop) {
-        System.out.println("Trailing stop loss...");
+        logger.info("(BitGet) Trailing stop loss for symbol: {}, orderId: {}, newStop: {}", symbol, orderId, newStop);
 
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("orderId", orderId);
-        payload.put("marginCoin", "USDT");
-        payload.put("productType", "USDT-FUTURES");
-        payload.put("symbol", symbol);
-        payload.put("triggerPrice", newStop.toPlainString());
-        payload.put("triggerType", "fill_price");
-        payload.put("executePrice", "0");
-        payload.put("size", "");
-
-
-        try {
-
-            String response = postToBitGet("/api/v2/mix/order/modify-tpsl-order", user, objectMapper.writeValueAsString(payload));
-            logger.info("\n\n\nBitGet stop traling response for user: {}, body: {}\n\n\n", user.getTgName(), response);
-            JsonNode root = objectMapper.readTree(response);
-
-            if (!validateJsonResopnse(response)) {
-                return OrderResult.error("Stop loss trailing fail: " + root.path("msg"), orderId, symbol);
-            }
-        } catch (Exception e) {
-            return OrderResult.error(e.getMessage(), orderId, symbol);
+        // Get position to determine side
+        List<Position> positions = getPositions(user).stream()
+            .filter(p -> p.getSymbol().equals(symbol))
+            .toList();
+        
+        if (positions.isEmpty()) {
+            logger.error("(BitGet) Position not found for updateStopLoss: symbol={}", symbol);
+            return OrderResult.error("Position not found", orderId, symbol);
         }
-        System.out.println("Stop loss trailing success");
-        return OrderResult.ok("OK", orderId, symbol);
+        
+        Position position = positions.getFirst();
+        String holdSide = position.getHoldSide();
+        
+        logger.info("(BitGet) Position found: holdSide={}, posId={}", holdSide, position.getPosId());
+        
+        // Validate SL price before attempting to update
+        if (!validateStopLossPrice(newStop, symbol, holdSide)) {
+            logger.warn("(BitGet) Stop loss price validation failed for update. Attempting adjustment...");
+            
+            // Try to adjust SL price slightly to make it valid
+            Ticker ticker = getTicker(symbol);
+            BigDecimal adjustment = ticker.getLastPrice().multiply(new BigDecimal("0.001")); // 0.1% adjustment
+            
+            if (holdSide.equalsIgnoreCase("LONG") || holdSide.equalsIgnoreCase("BUY")) {
+                newStop = ticker.getLastPrice().subtract(adjustment);
+            } else {
+                newStop = ticker.getLastPrice().add(adjustment);
+            }
+            
+            logger.info("(BitGet) Adjusted SL price for update to: {}", newStop);
+        }
+
+        // Retry logic with exponential backoff
+        int maxRetries = 3;
+        int retryDelay = 500; // Start with 500ms
+        
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                if (attempt > 0) {
+                    logger.info("(BitGet) Retry attempt {} for updating stop loss", attempt + 1);
+                    Thread.sleep(retryDelay);
+                    retryDelay *= 2; // Exponential backoff
+                    
+                    // Re-validate with fresh market data
+                    Ticker freshTicker = getTicker(symbol);
+                    logger.info("(BitGet) Fresh market data - MarkPrice: {}, LastPrice: {}", 
+                        freshTicker.getMarkPrice(), freshTicker.getLastPrice());
+                }
+
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("orderId", orderId);
+                payload.put("marginCoin", "USDT");
+                payload.put("productType", "USDT-FUTURES");
+                payload.put("symbol", symbol);
+                payload.put("triggerPrice", newStop.toPlainString());
+                payload.put("triggerType", "fill_price");
+                payload.put("executePrice", "0");
+                payload.put("size", "");
+
+                String response = postToBitGet("/api/v2/mix/order/modify-tpsl-order", user, objectMapper.writeValueAsString(payload));
+                logger.info("(BitGet) Stop trailing response for user: {}, body: {}", user.getTgName(), response);
+                JsonNode root = objectMapper.readTree(response);
+
+                // Check for specific error codes or messages
+                if (root.has("code") && !root.get("code").asText().equals("00000")) {
+                    String errorCode = root.get("code").asText();
+                    String errorMsg = root.path("msg").asText();
+                    logger.warn("(BitGet) Error {} - SL modification failed on attempt {}: {}", 
+                        errorCode, attempt + 1, errorMsg);
+                    
+                    if (attempt < maxRetries - 1) {
+                        // Adjust price for next retry
+                        Ticker retryTicker = getTicker(symbol);
+                        BigDecimal buffer = retryTicker.getLastPrice().multiply(new BigDecimal("0.002")); // Increase buffer
+                        
+                        if (holdSide.equalsIgnoreCase("LONG") || holdSide.equalsIgnoreCase("BUY")) {
+                            newStop = retryTicker.getLastPrice().subtract(buffer);
+                        } else {
+                            newStop = retryTicker.getLastPrice().add(buffer);
+                        }
+                        
+                        logger.info("(BitGet) Adjusted SL price for retry: {}", newStop);
+                        continue; // Retry
+                    }
+                }
+
+                if (!validateJsonResopnse(response)) {
+                    logger.warn("(BitGet) Stop loss trailing validation failed");
+                    if (attempt == maxRetries - 1) {
+                        return OrderResult.error("Stop loss trailing fail after " + maxRetries + " attempts: " + root.path("msg").asText(), orderId, symbol);
+                    }
+                    continue; // Retry
+                }
+                
+                logger.info("(BitGet) Stop loss trailing success");
+                return OrderResult.ok("OK", orderId, symbol);
+                
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.error("(BitGet) Stop loss update interrupted: {}", e.getMessage());
+                return OrderResult.error("Interrupted", orderId, symbol);
+            } catch (Exception e) {
+                logger.error("(BitGet) Stop loss trailing failed on attempt {} for symbol {}: {}", attempt + 1, symbol, e.getMessage());
+                if (attempt == maxRetries - 1) {
+                    return OrderResult.error(e.getMessage(), orderId, symbol);
+                }
+            }
+        }
+        
+        return OrderResult.error("Failed after all retry attempts", orderId, symbol);
     }
 
     @Override
@@ -1092,6 +1177,80 @@ public class BitGetTradeService implements TradeService {
         }
 
         return tickers;
+    }
+
+    /**
+     * Gets ticker data for a specific symbol, including mark price and last price
+     * @param symbol The trading pair symbol
+     * @return Ticker object with current market data
+     */
+    public Ticker getTicker(String symbol) {
+        Request request = new Request.Builder()
+                .url(BITGET_API_BASE_URL + GET_SYMBOLS)
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            String responseBody = Objects.requireNonNull(response.body()).string();
+            JSONObject ret = new JSONObject(responseBody);
+            JSONArray data = ret.getJSONArray("data");
+
+            for (int i = 0; i < data.length(); i++) {
+                JSONObject ticker = data.getJSONObject(i);
+                if (ticker.getString("symbol").equals(symbol)) {
+                    return new Ticker(
+                        symbol,
+                        new BigDecimal(ticker.optString("lastPr", "0.0")),
+                        new BigDecimal(ticker.optString("markPrice", "0.0"))
+                    );
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Error fetching ticker for symbol {}: {}", symbol, e.getMessage());
+        }
+        
+        // Return empty ticker with zero prices if not found
+        return new Ticker(symbol, BigDecimal.ZERO, BigDecimal.ZERO);
+    }
+
+    /**
+     * Validates stop loss price against current market prices for BitGet
+     * @param slPrice The stop loss price to validate
+     * @param symbol The trading pair symbol
+     * @param holdSide Position side (LONG/BUY or SHORT/SELL)
+     * @return true if SL price is valid, false otherwise
+     */
+    private boolean validateStopLossPrice(BigDecimal slPrice, String symbol, String holdSide) {
+        try {
+            Ticker ticker = getTicker(symbol);
+            BigDecimal markPrice = ticker.getMarkPrice();
+            BigDecimal lastPrice = ticker.getLastPrice();
+            
+            logger.info("(BitGet) SL Validation - Symbol: {}, Side: {}, SL: {}, MarkPrice: {}, LastPrice: {}", 
+                symbol, holdSide, slPrice, markPrice, lastPrice);
+            
+            // For LONG positions, SL must be below current price
+            if (holdSide.equalsIgnoreCase("LONG") || holdSide.equalsIgnoreCase("BUY")) {
+                boolean valid = slPrice.compareTo(lastPrice) < 0;
+                if (!valid) {
+                    logger.warn("(BitGet) Invalid SL for LONG: SL {} must be less than lastPrice {}", slPrice, lastPrice);
+                }
+                return valid;
+            } 
+            // For SHORT positions, SL must be above current price  
+            else if (holdSide.equalsIgnoreCase("SHORT") || holdSide.equalsIgnoreCase("SELL")) {
+                boolean valid = slPrice.compareTo(lastPrice) > 0;
+                if (!valid) {
+                    logger.warn("(BitGet) Invalid SL for SHORT: SL {} must be greater than lastPrice {}", slPrice, lastPrice);
+                }
+                return valid;
+            }
+            
+            logger.warn("(BitGet) Unknown position side: {}", holdSide);
+            return false;
+        } catch (Exception e) {
+            logger.error("(BitGet) Error validating SL price: {}", e.getMessage());
+            return false;
+        }
     }
 
     @Override

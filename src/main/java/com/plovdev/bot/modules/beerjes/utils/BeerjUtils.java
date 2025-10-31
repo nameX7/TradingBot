@@ -497,4 +497,69 @@ public class BeerjUtils {
             throw new RuntimeException(e);
         }
     }
+
+    /**
+     * Validates that TP levels sum to the expected total position size
+     * @param levels List of take profit levels to validate
+     * @param expectedTotal Expected total position size
+     * @param symbol Symbol being traded (for logging)
+     * @return true if validation passes, false otherwise
+     */
+    public static boolean validateTakeProfitVolumes(List<TakeProfitLevel> levels, BigDecimal expectedTotal, String symbol) {
+        if (levels == null || levels.isEmpty()) {
+            logger.warn("TP Validation FAILED for {}: No TP levels provided", symbol);
+            return false;
+        }
+
+        BigDecimal actualTotal = levels.stream()
+            .map(TakeProfitLevel::getSize)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        boolean volumesMatch = actualTotal.compareTo(expectedTotal) == 0;
+        
+        logger.info("TP Volume Validation for {}: Expected={}, Actual={}, Match={}", 
+            symbol, expectedTotal, actualTotal, volumesMatch);
+        
+        if (!volumesMatch) {
+            BigDecimal difference = expectedTotal.subtract(actualTotal);
+            logger.warn("TP Volume Mismatch for {}: Difference={}, Levels={}", 
+                symbol, difference, levels);
+        }
+        
+        // Log individual levels for transparency
+        for (int i = 0; i < levels.size(); i++) {
+            TakeProfitLevel level = levels.get(i);
+            logger.info("TP Level {}: Price={}, Size={}", i + 1, level.getPrice(), level.getSize());
+        }
+        
+        return volumesMatch;
+    }
+
+    /**
+     * Validates that all TP orders are properly configured as reduce-only
+     * @param orders List of order payloads to validate
+     * @param symbol Symbol being traded (for logging)
+     * @return true if all orders are reduce-only, false otherwise
+     */
+    public static boolean validateReduceOnlyOrders(List<Map<String, String>> orders, String symbol) {
+        if (orders == null || orders.isEmpty()) {
+            logger.warn("Reduce-Only Validation for {}: No orders provided", symbol);
+            return true; // Empty is technically valid
+        }
+
+        boolean allReduceOnly = true;
+        for (int i = 0; i < orders.size(); i++) {
+            Map<String, String> order = orders.get(i);
+            String reduceOnly = order.get("reduceOnly");
+            
+            if (reduceOnly == null || (!reduceOnly.equals("yes") && !reduceOnly.equals("true"))) {
+                logger.error("TP Order {} for {} is NOT reduce-only: {}", i + 1, symbol, order);
+                allReduceOnly = false;
+            } else {
+                logger.info("TP Order {} for {} is reduce-only: ✓", i + 1, symbol);
+            }
+        }
+        
+        return allReduceOnly;
+    }
 }
