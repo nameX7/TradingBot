@@ -31,10 +31,16 @@ public class BitGetTakesSetuper {
 
 
     public List<Map<String, String>> placeTakes(BigDecimal positionSize, List<TakeProfitLevel> tpLevels, String symbol, String direction) {
-        System.out.println(positionSize + " - Position size");
+        logger.info("(BitGet) Placing TP orders for {} - Total size: {}, Direction: {}", symbol, positionSize, direction);
+        
+        // Validate TP volumes before creating orders
+        if (!BeerjUtils.validateTakeProfitVolumes(tpLevels, positionSize, symbol)) {
+            logger.error("(BitGet) TP volume validation failed for {}!", symbol);
+        }
+        
         List<Map<String, String>> orders = new ArrayList<>();
         for (TakeProfitLevel level : tpLevels) {
-            System.out.println(level);
+            logger.info("(BitGet) Creating TP order - Price: {}, Size: {}", level.getPrice(), level.getSize());
             BigDecimal size = level.getSize();
 
             Map<String, String> payload = new HashMap<>();
@@ -51,6 +57,13 @@ public class BitGetTakesSetuper {
             payload.put("reduceOnly", "yes"); // КРИТИЧЕСКИ ВАЖНО - только закрытие!
             orders.add(payload);
         }
+        
+        // Validate reduce-only flag is set correctly
+        if (!BeerjUtils.validateReduceOnlyOrders(orders, symbol)) {
+            logger.error("(BitGet) Reduce-only validation failed for {}!", symbol);
+        }
+        
+        logger.info("(BitGet) Created {} TP orders for {}", orders.size(), symbol);
         return orders;
     }
 
