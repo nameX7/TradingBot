@@ -6,8 +6,10 @@ import com.plovdev.bot.modules.beerjes.Position;
 import com.plovdev.bot.modules.beerjes.TakeProfitLevel;
 import com.plovdev.bot.modules.beerjes.monitoring.BitGetWS;
 import com.plovdev.bot.modules.beerjes.utils.BeerjUtils;
+import com.plovdev.bot.modules.beerjes.utils.StopLossCorrector;
 import com.plovdev.bot.modules.databases.UserEntity;
 import com.plovdev.bot.modules.models.*;
+import com.plovdev.bot.modules.parsers.Signal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,11 +24,13 @@ public class BitGetTakesSetuper {
     private final SettingsService settings = new SettingsService();
     private final BitGetStopLossTrailer trailer;
     private final StopInProfitTrigger trigger;
+    private final StopLossCorrector stopLossCorrector;
 
     public BitGetTakesSetuper(StopInProfitTrigger trg, BitGetTradeService service, BitGetStopLossTrailer st) {
         this.service = service;
         trailer = st;
         trigger = trg;
+        stopLossCorrector = new StopLossCorrector(service);
     }
 
 
@@ -54,7 +58,7 @@ public class BitGetTakesSetuper {
         return orders;
     }
 
-    public void manageTakesInMonitor(BitGetWS ws, String symbol, UserEntity user, List<Map<String, String>> orders, String stopLossId, List<TakeProfitLevel> tpLevels, SymbolInfo info, BigDecimal positionSize, String direction) {
+    public void manageTakesInMonitor(BitGetWS ws, String symbol, UserEntity user, List<Map<String, String>> orders, String stopLossId, List<TakeProfitLevel> tpLevels, SymbolInfo info, BigDecimal positionSize, String direction, Signal signal) {
         TypeValueSwitcher<Boolean> isOrdered = new TypeValueSwitcher<>(false);
         List<OrderResult> ids = new ArrayList<>(service.placeOrders(user, symbol, orders).stream().filter(OrderResult::succes).toList());
         System.out.println(ids);
@@ -121,12 +125,11 @@ public class BitGetTakesSetuper {
                                 logger.info("Stop loss was trailing success");
                             } else {
                                 isOrdered.setT(false);
-                                trigger.setTakeToTrailNumber(trigger.getTakeToTrailNumber()+1);
-                                BigDecimal oldPercent = trigger.getStopInProfitPercent();
-                                trigger.setTriggerProfitPercent(new BigDecimal("0.0"));
-                                OrderResult stopOrderAgain = trailer.trailStopByFirstTakeHit(user, symbol, posSide, stopLossId, info.getPricePlace());
-                                System.out.println("(BitGet)Again place stop order: " + stopOrderAgain);
-                                trigger.setTriggerProfitPercent(oldPercent);
+                                trigger.setTakeToTrailNumber(trigger.getTakeToTrailNumber() + 1);
+
+                                BigDecimal newStop = stopLossCorrector.correct(new BigDecimal(signal.getStopLoss()), symbol, direction, info);
+                                OrderResult stopOrderAgain = service.updateStopLoss(user, stopLossId, symbol, newStop);
+                                System.out.println("Again place stop order: " + stopOrderAgain);
                             }
                         }
                     } catch (Exception e) {

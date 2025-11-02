@@ -14,6 +14,7 @@ import com.plovdev.bot.modules.beerjes.security.BitGetSecurity;
 import com.plovdev.bot.modules.beerjes.security.BitUnixSecurity;
 import com.plovdev.bot.modules.beerjes.security.EncryptionService;
 import com.plovdev.bot.modules.beerjes.utils.BeerjUtils;
+import com.plovdev.bot.modules.beerjes.utils.StopLossCorrector;
 import com.plovdev.bot.modules.databases.UserEntity;
 import com.plovdev.bot.modules.exceptions.ApiException;
 import com.plovdev.bot.modules.exceptions.InvalidParametresException;
@@ -37,10 +38,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 import static com.plovdev.bot.modules.beerjes.utils.BitUnixUtils.*;
@@ -51,6 +49,8 @@ public class BitUnixTradeService implements TradeService {
     private final BitUnixSecurity security;
     private final SettingsService settingsService = new SettingsService();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ExecutorService executor = Executors.newFixedThreadPool(10);
+    private final StopLossCorrector stopLossCorrector = new StopLossCorrector(this);
 
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectionPool(new ConnectionPool(5, 5, TimeUnit.MINUTES))
@@ -95,16 +95,22 @@ public class BitUnixTradeService implements TradeService {
         String srcFrom = signal.getSrc().toLowerCase();
         BitUnixOrderOpener opener = new BitUnixOrderOpener(signal, security, this);
 
+        BitUnixWS ws = null;
+        try {
+            ws = new BitUnixWS(user, this, symbol);
+        } catch (Exception e) {
+            logger.warn("Error to initialize 'BitUnixWS'");
+        }
+
         int effectiveLeverage = getEffectiveLeverage(symbolInfo.getMaxLever(), Integer.parseInt(user.getPlecho()));
         BigDecimal leverage = BigDecimal.valueOf(effectiveLeverage);
 
-        CompletableFuture<OrderResult> changeLeverFuture = CompletableFuture.supplyAsync(() -> {
+        Future<OrderResult> changeLeverFuture = executor.submit(() -> {
             setMarginMode(user, "ISOLATION", symbol);
             return changeLeverge(user, symbol, direction, effectiveLeverage);
         });
-        CompletableFuture<OrderResult> validateOpen = CompletableFuture.supplyAsync(() -> BeerjUtils.valdateOpen(user, signal));
+        Future<OrderResult> validateOpen = executor.submit(() -> BeerjUtils.valdateOpen(user, signal));
         BigDecimal posSize = BeerjUtils.getPosSize(user, signal, this, entry);
-        CompletableFuture.allOf(changeLeverFuture, validateOpen).join();
 
         logger.info("Configurated environment.");
         //----------------------------------------------------------\\
@@ -122,6 +128,13 @@ public class BitUnixTradeService implements TradeService {
         BigDecimal oneOrderSize = (new BigDecimal("100.0").divide(BigDecimal.valueOf(types.size()), symbolInfo.getPricePlace(), RoundingMode.HALF_EVEN)).divide(new BigDecimal("100.0"), 2, RoundingMode.HALF_EVEN);
         BigDecimal totalSize = setSize(symbolInfo, positionSize.multiply(oneOrderSize).setScale(symbolInfo.getVolumePlace(), RoundingMode.HALF_EVEN));
         custom.warn("Total size before scaling: {}", totalSize);
+
+        if (ws != null) {
+            logger.info("Starting position monitor...");
+            startPositionMonitor(user, symbol, signal, totalSize, ws, totalSize, symbolInfo, oec);
+            ws.setStopId(oec.getStopLossId());
+            logger.info("Position monitor started.");
+        }
 
         logger.info("Try change leverage. New lever: {}", effectiveLeverage);
         OrderResult leverResult = changeLeverFuture.get();
@@ -157,13 +170,6 @@ public class BitUnixTradeService implements TradeService {
             }
         }
 
-        BitUnixWS ws = null;
-        try {
-            ws = new BitUnixWS(user, this, symbol);
-        } catch (Exception e) {
-            logger.warn("Error to initialize 'BitUnixWS'");
-        }
-
         if (types.contains("market")) {
             Utils.sleep(1100);
             List<Position> positions = getPositions(user).stream().filter(p -> {
@@ -178,7 +184,8 @@ public class BitUnixTradeService implements TradeService {
                 OrderResult stopLossResult = placeStopLoss(user, position, signal.getStopLoss(), symbolInfo, oec);
                 custom.info("Setuped sl: {}", stopLossResult.id());
                 if (!stopLossResult.succes()) {
-                    OrderResult stopLossResultAgain = placeStopLoss(user, position, signal.getStopLoss(), symbolInfo, oec);
+                    String newStop = stopLossCorrector.correct(new BigDecimal(signal.getStopLoss()), symbol, direction, symbolInfo).toPlainString();
+                    OrderResult stopLossResultAgain = placeStopLoss(user, position, newStop, symbolInfo, oec);
                     custom.info("Again setuped sl: {}", stopLossResultAgain.id());
                     if (stopLossResultAgain.succes()) {
                         logger.info("Position stop-loss placed success after retry");
@@ -210,13 +217,6 @@ public class BitUnixTradeService implements TradeService {
             }
         } else {
             logger.info("Signal for {}, {} haven't merket orders. User: {}", symbol, direction, user.getTgName());
-        }
-
-        if (ws != null) {
-            logger.info("Starting position monitor...");
-            startPositionMonitor(user, symbol, signal, totalSize, ws, totalSize, symbolInfo, oec);
-            ws.setStopId(oec.getStopLossId());
-            logger.info("Position monitor started.");
         }
 
         long endTimeOpening = System.currentTimeMillis();
@@ -1316,5 +1316,30 @@ public class BitUnixTradeService implements TradeService {
             logger.error("Margin-mode change error: ", e);
         }
         printPart("margin mode changed");
+    }
+
+    @Override
+    public Ticker getTicker(String symbol) {
+        Request request = new Request.Builder()
+                .url(BITUNIX_API_BASE_URL + "/api/v1/futures/market/tickers?symbols="+symbol.toUpperCase())
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            String responseBody = Objects.requireNonNull(response.body()).string();
+
+            JSONObject ret = new JSONObject(responseBody);
+            JSONArray data = ret.getJSONArray("data");
+
+            if (!data.isEmpty()) {
+                JSONObject ticker = data.getJSONObject(0);
+                return new Ticker(ticker.getString("symbol"), new BigDecimal(ticker.optString("lastPrice", "0.0")), new BigDecimal(ticker.optString("markPrice", "0.0")));
+            }
+        } catch (Exception e) {
+            logger.error("ERR ", e);
+        }
+        Ticker t = new Ticker();
+        t.setSymbol(symbol);
+
+        return t;
     }
 }

@@ -227,7 +227,8 @@ public class ProfileEditer {
             UserEntity repository = (UserEntity) repo;
             userDB.update("beerj", "bitget", from.getId().toString());
 
-            EditMessageText edit = new EditMessageText(manager.getText(repository.getLanguage(), "lcsacc"));
+            EditMessageText edit = new EditMessageText(manager.getText(repository.getLanguage(), "getUid"));
+            edit.setParseMode("HTML");
             edit.setChatId(chatId);
             edit.setMessageId(message.getMessageId());
             userDB.update("state", "getNewUidForSetBeerj:" + chatId, chatId);
@@ -240,8 +241,9 @@ public class ProfileEditer {
             UserEntity repository = (UserEntity) repo;
             userDB.update("beerj", "bitunix", from.getId().toString());
 
-            EditMessageText edit = new EditMessageText(manager.getText(repository.getLanguage(), "lcsacc"));
+            EditMessageText edit = new EditMessageText(manager.getText(repository.getLanguage(), "getUid"));
             edit.setChatId(chatId);
+            edit.setParseMode("HTML");
             edit.setMessageId(message.getMessageId());
             userDB.update("state", "getNewUidForSetBeerj:" + chatId, chatId);
 

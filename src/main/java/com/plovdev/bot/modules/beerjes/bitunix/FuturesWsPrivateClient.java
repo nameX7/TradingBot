@@ -40,18 +40,26 @@ public class FuturesWsPrivateClient {
     }
 
     public void close() {
-        webSocket.close(1000, "Ok");
+        //stopPingTimer(); // stop ping timer
+        if (webSocket != null) {
+            webSocket.close(1000, "Ok");
+        }
     }
 
     /**
      * Создает OkHttpClient с бесконечными таймаутами для WebSocket
+
+     * Attention: The readTimeout of the WebSocket connection should be set to 0 (infinite), because:
+     * 1. WebSocket has its own heartbeat mechanism (application layer JSON heartbeat)
+     * 2. Setting readTimeout will cause the connection to be forcibly closed when idle, which may trigger a 1006 error
+     * 3. Network intermediaries (proxies, load balancers) usually need to see a continuous data stream to maintain the connection
      */
     private OkHttpClient createInfiniteTimeoutHttpClient() {
         return new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(10)) // Установить разумный таймаут подключения
-                .readTimeout(Duration.ofSeconds(300))  // 5 минут — явный таймаут чтения
-                .writeTimeout(Duration.ofSeconds(300)) // 5 минут — явный таймаут записи
-                .callTimeout(Duration.ZERO)           // Общий таймаут можно оставить 0
+                .connectTimeout(Duration.ofSeconds(10)) // Connection timeout set to a reasonable value
+                .readTimeout(Duration.ZERO)             // WebSocket read timeout set to 0 (infinite), to avoid connection being forcibly closed when idle
+                .writeTimeout(Duration.ofSeconds(30))   // Write timeout set to 30 seconds
+                .callTimeout(Duration.ZERO)             // Call timeout set to 0, managed by WebSocket itself
                 .retryOnConnectionFailure(true)
                 .connectionPool(new ConnectionPool(5, 10, TimeUnit.MINUTES))
                 .build();
@@ -61,6 +69,7 @@ public class FuturesWsPrivateClient {
     private Request wsRequest = null;
     private WebSocketListener webSocketListener = null;
     private BitunixPrivateWsResponseListener bitunixPrivateWsResponseListener = null;
+    private Timer pingTimer = null; // Сохраняем ссылку на Timer для управления
 
     public void connect(BitunixPrivateWsResponseListener listener) {
         this.bitunixPrivateWsResponseListener = listener;
@@ -113,32 +122,55 @@ public class FuturesWsPrivateClient {
             public void onClosed(@NotNull WebSocket webSocket, int code, @NotNull String reason) {
                 log.info("WebSocket closed - code: {}, reason: {}", code, reason);
                 active.set(false);
+                //stopPingTimer(); // Останавливаем ping timer при закрытии
+
+                // 1006 error code indicates abnormal closure (no close frame received), needs special handling
+                if (code == 1006) {
+                    log.warn("WebSocket closed abnormally (1006) - connection lost without close frame. This may indicate network issues or server timeout.");
+                }
+
                 if (code != 1000) {
                     log.info("Try reconnect");
+                    // For 1006 error, add a delay reconnect to avoid immediate reconnect failure
+                    scheduleReconnectWithDelay(0);
                 } else {
-                    log.info("Все ок, это мы закрыли соеденение с Bitunix.");
+                    log.info("All ok, we closed the connection with Bitunix.");
+                    // Do not reconnect on normal closure
                 }
-                scheduleReconnect();
             }
 
             @Override
             public void onFailure(@NotNull WebSocket webSocket, @NotNull Throwable t, @Nullable Response response) {
                 log.warn("WebSocket connection failure", t);
                 active.set(false);
-                scheduleReconnect();
+                //stopPingTimer(); // Stop ping timer on failure
+
+                // 1006 error code usually triggers onFailure because this is an abnormal closure
+                String errorMsg = t.getMessage();
+                if (errorMsg != null && errorMsg.contains("1006")) {
+                    log.warn("Detected 1006 error in failure handler - abnormal closure without close frame");
+                    scheduleReconnectWithDelay(0); // Add 5 second delay
+                } else {
+                    scheduleReconnectWithDelay(0); // Other errors 3 second delay
+                }
             }
         };
 
+        // Останавливаем предыдущий ping timer, если есть
+        //stopPingTimer();
+
         Thread.startVirtualThread(() -> {
-            Timer ping = new Timer();
-            ping.scheduleAtFixedRate(new TimerTask() {
+            pingTimer = new Timer("Bitunix-Ping-Timer", true);
+            pingTimer.scheduleAtFixedRate(new TimerTask() {
                 @Override
                 public void run() {
                     if (isActive()) {
                         sendPing();
                     }
                 }
-            }, 1000, 10000);
+            }, 5000, 30000); // First delay 5 seconds, then send a heartbeat every 30 seconds
+            // 30 second interval can ensure that keepalive is sent within the timeout of the network intermediary
+            // Avoid 1006 error due to idle timeout
         });
 
         // Создаем запрос для WebSocket соединения
@@ -150,7 +182,11 @@ public class FuturesWsPrivateClient {
     }
 
     /**
-     * Запускает планировщик пингов для поддержания соединения
+     * Send application layer heartbeat (JSON formatted ping message)
+
+     * Attention: This is an application layer heartbeat, not a PING control frame at the WebSocket protocol layer.
+     * Some network intermediaries (proxies, load balancers) may need to see a continuous data stream to maintain the connection.
+     * If you encounter a 1006 error, it may be that the network intermediary has disconnected due to idle timeout.
      */
     public void sendPing() {
         if (active.get() && webSocket != null) {
@@ -163,6 +199,7 @@ public class FuturesWsPrivateClient {
                             """, Instant.now().getEpochSecond());
 
                 webSocket.send(pingMessage);
+                log.debug("Sent application-layer ping message");
             } catch (Exception e) {
                 log.error("Failed to send ping message", e);
                 active.set(false);
@@ -191,15 +228,37 @@ public class FuturesWsPrivateClient {
     }
 
     /**
+     * Останавливает ping timer
+     */
+    private void stopPingTimer() {
+        if (pingTimer != null) {
+            try {
+                pingTimer.cancel();
+                pingTimer.purge();
+            } catch (Exception e) {
+                log.warn("Error stopping ping timer", e);
+            }
+            pingTimer = null;
+        }
+    }
+
+    /**
      * Планирует переподключение с задержкой
      */
     private void scheduleReconnect() {
+        scheduleReconnectWithDelay(0); // Default 3 second delay
+    }
+
+    /**
+     * Планирует переподключение с указанной задержкой（秒）
+     */
+    private void scheduleReconnectWithDelay(int delaySeconds) {
         if (!reconnecting.compareAndSet(false, true)) {
             log.info("Reconnection already in progress");
             return; // Уже в процессе реконнекта
         }
 
-        log.info("Scheduling reconnection...");
+        log.info("Scheduling reconnection after {} seconds...", delaySeconds);
 
         // Останавливаем предыдущий планировщик реконнекта
         if (reconnectExecutor != null) {
@@ -215,26 +274,12 @@ public class FuturesWsPrivateClient {
             } catch (Exception e) {
                 log.error("Reconnection attempt failed", e);
                 reconnecting.set(false);
-                // Планируем следующую попытку через 10 секунд
-                scheduleDelayedReconnect(0);
+                // After failure, add a delay reconnect (exponential backoff)
+                scheduleReconnectWithDelay(Math.min(delaySeconds * 2, 30));
             }
-        }, 0, TimeUnit.SECONDS);
-    }
-
-    /**
-     * Планирует переподключение с указанной задержкой
-     */
-    private void scheduleDelayedReconnect(int delaySeconds) {
-        if (reconnectExecutor != null) {
-            reconnectExecutor.shutdownNow();
-        }
-
-        reconnectExecutor = Executors.newSingleThreadScheduledExecutor();
-        reconnectExecutor.schedule(() -> {
-            reconnecting.set(false);
-            reconnect();
         }, delaySeconds, TimeUnit.SECONDS);
     }
+
 
     /**
      * Выполняет переподключение к WebSocket
@@ -269,6 +314,9 @@ public class FuturesWsPrivateClient {
         log.info("Disconnecting WebSocket...");
         active.set(false);
         reconnecting.set(false);
+
+        // Останавливаем ping timer
+        stopPingTimer();
 
         if (reconnectExecutor != null) {
             reconnectExecutor.shutdownNow();

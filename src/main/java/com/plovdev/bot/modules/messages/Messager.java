@@ -91,7 +91,6 @@ public class Messager {
         registerComand("/help", ((update, msg, from, chatId, text, r) -> {
             UserEntity repository = (UserEntity) r;
             if (repository.getStatus() != null && statuses.contains(repository.getStatus())) {
-                if (!repository.getState().equals("none")) return;
                 String helpText = manager.getText(repository.getLanguage(), "help");
                 if (repository.getRole().equalsIgnoreCase("admin")) {
                     helpText += """

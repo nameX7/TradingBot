@@ -152,17 +152,22 @@ public class BeerjUtils {
 
         boolean isLong = "LONG".equalsIgnoreCase(signal.getDirection());
 
-        List<BigDecimal> signalTargets = signal.getTargets().stream().filter(t -> {
+        List<BigDecimal> signalTargets = new ArrayList<>(signal.getTargets().stream().filter(t -> {
             if (isLong) {
                 return t.compareTo(currentPrice) > 0;
             } else {
                 return t.compareTo(currentPrice) < 0;
             }
-        }).toList();
+        }).toList());
         logger.info("Targets: {}", signalTargets);
         if (signalTargets.isEmpty() || tpRatios == null || tpRatios.isEmpty()) {
             logger.warn("Empty data: signal targets, tp ratios, returning...");
             return result;
+        }
+
+        signalTargets.sort(Comparator.naturalOrder());
+        if (!isLong) {
+            signalTargets.sort(Comparator.reverseOrder());
         }
 
 

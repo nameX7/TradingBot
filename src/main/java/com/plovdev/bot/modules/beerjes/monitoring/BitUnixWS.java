@@ -74,7 +74,7 @@ public class BitUnixWS {
     private final FuturesWsPrivateClient client;
 
     public void close() {
-        client.close();
+        //client.close();
     }
 
     public BitUnixWS(UserEntity user, BitUnixTradeService tradeService, String symbol) {

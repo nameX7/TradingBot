@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.plovdev.bot.modules.beerjes.*;
 import com.plovdev.bot.modules.beerjes.monitoring.BitUnixWS;
 import com.plovdev.bot.modules.beerjes.utils.BeerjUtils;
+import com.plovdev.bot.modules.beerjes.utils.StopLossCorrector;
 import com.plovdev.bot.modules.databases.UserEntity;
 import com.plovdev.bot.modules.models.*;
 import com.plovdev.bot.modules.parsers.Signal;
@@ -22,11 +23,13 @@ public class BitUnixTakesSetuper {
     private final BitUnixStopLossTrailer trailer;
     private final StopInProfitTrigger trigger;
     private final ObjectMapper mapper = new ObjectMapper();
+    private final StopLossCorrector stopLossCorrector;
 
     public BitUnixTakesSetuper(StopInProfitTrigger tgr, BitUnixTradeService service, BitUnixStopLossTrailer st) {
         this.service = service;
         trailer = st;
         trigger = tgr;
+        stopLossCorrector = new StopLossCorrector(service);
     }
 
     public void manageTakesInMonitor(BitUnixWS ws, String symbol, UserEntity user, List<OrderResult> ids, String stopLossId, List<TakeProfitLevel> tpLevels, SymbolInfo info, String direction, Signal signal, OrderExecutionContext context) {
@@ -148,7 +151,7 @@ public class BitUnixTakesSetuper {
             System.out.println(isOrdered.getT() + " - isOrdered");
 
             if (side.equalsIgnoreCase("close")) {
-                context.setExecutedTakeNumber(context.getExecutedTakeNumber()+1);
+                context.setExecutedTakeNumber(context.getExecutedTakeNumber() + 1);
                 if (!isOrdered.getT()) {
                     if (isTakeHit(inputOrder, tpLevels, ids, symbol, context)) {
                         try {
@@ -178,16 +181,10 @@ public class BitUnixTakesSetuper {
                                 } else {
                                     isOrdered.setT(false);
                                     trigger.setTakeToTrailNumber(trigger.getTakeToTrailNumber() + 1);
-                                    BigDecimal oldPercent = trigger.getStopInProfitPercent();
-                                    trigger.setStopInProfitPercent(new BigDecimal("-0.5"));
-                                    try {
-                                        OrderResult stopOrderAgain = trailer.trailStopByFirstTakeHit(user, symbol, side, stopLossId, info.getPricePlace());
-                                        System.out.println("Again place stop order: " + stopOrderAgain);
-                                    } catch (Exception e) {
-                                        logger.error("Cann't trailing stop in profit to enter-point.");
-                                    } finally {
-                                        trigger.setStopInProfitPercent(oldPercent);
-                                    }
+
+                                    BigDecimal newStop = stopLossCorrector.correct(new BigDecimal(signal.getStopLoss()), symbol, direction, info);
+                                    OrderResult stopOrderAgain = service.updateStopLoss(user, stopLossId, symbol, newStop);
+                                    System.out.println("Again place stop order: " + stopOrderAgain);
                                 }
                             }
                             isOrdered.setT(true);

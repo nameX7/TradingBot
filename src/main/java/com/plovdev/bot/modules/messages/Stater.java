@@ -2,7 +2,6 @@ package com.plovdev.bot.modules.messages;
 
 import com.plovdev.bot.bots.*;
 import com.plovdev.bot.modules.beerjes.Order;
-import com.plovdev.bot.modules.beerjes.Position;
 import com.plovdev.bot.modules.beerjes.TradeService;
 import com.plovdev.bot.modules.beerjes.utils.BeerjUtils;
 import com.plovdev.bot.modules.databases.*;
@@ -97,12 +96,12 @@ public class Stater {
             UserEntity base = (UserEntity) userDB.get(chatId);
             String userId = repository.getTgId();
             if (Utils.isOnlyNumbers(text)) {
-                userDB.update("state", "getNewSecretKey:" + userId, chatId);
+                userDB.update("state", "none" + userId, chatId);
                 userDB.update("uid", text, userId);
 
                 SendMessage sm = new SendMessage(chatId, manager.getText(base.getLanguage(), "validUid"));
                 bot.execute(sm);
-
+                blanksDB.add(repository.getTgId(), repository.getUID(), repository.getTgName(), "waiting", "pend", repository.getBeerj());
                 userDB.getAll().stream()
                         .filter(e -> e.getRole().equals("admin") || e.getRole().equalsIgnoreCase("moder"))
                         .forEach(repos -> {
@@ -357,7 +356,7 @@ public class Stater {
                     sm.setParseMode("HTML");
                     bot.execute(sm);
                 } else {
-                    bot.execute(new SendMessage(chatId, manager.getText(base.getLanguage(), "invalidPlech")));
+                    bot.execute(new SendMessage(chatId, manager.getText(base.getLanguage(), "invalidPlecho")));
                 }
             } else {
                 SendMessage sm = new SendMessage(chatId, manager.getText(base.getLanguage(), "nonNumber"));
@@ -440,11 +439,11 @@ public class Stater {
                     sm.setReplyMarkup(new InlineKeyboardMarkup(List.of(buttons)));
                     bot.execute(sm);
                 } else {
-                    SendMessage sm = new SendMessage(chatId, manager.getText(base.getLanguage(), "nonNumber"));
+                    SendMessage sm = new SendMessage(chatId, manager.getText(base.getLanguage(), "invalidPlecho"));
                     bot.execute(sm);
                 }
             } else {
-                bot.execute(new SendMessage(chatId, manager.getText(base.getLanguage(), "invalidPlech")));
+                bot.execute(new SendMessage(chatId, manager.getText(base.getLanguage(), "nonNumber")));
             }
         })));
 
@@ -633,14 +632,17 @@ public class Stater {
                     Entity entity = userDB.getByUid(g);
                     if (entity != null) {
                         userDB.updateByUid("grp", group, g);
+                        logger.info("Added/Removed: {}", g);
                     } else {
                         try {
                             bot.execute(new SendMessage(chatId, "Пользователь с UID: " + g + " не найден."));
+                            logger.info("Skipped: {}, no in bot", g);
                         } catch (TelegramApiException e) {
                             System.out.println(e.getMessage());
                         }
                     }
                 });
+                bot.execute(new SendMessage(chatId, "Изменения вступили в силу."));
                 userDB.update("state", "none", chatId);
             } catch (Exception e) {
                 logger.error("Error error");
@@ -773,14 +775,6 @@ public class Stater {
                         cancelLimit(p.trim(), chatId);
                     }
                 } else cancelLimit(pair.trim(), chatId);
-            } else sendNoPerms(bot, adminRepo);
-            userDB.update("state", "none", chatId);
-        })));
-
-        machine.addState(new State("adminGetPairForCancelingAll", ((update, message, from, chatId, pair, repo, name) -> {
-            UserEntity adminRepo = (UserEntity) userDB.get(chatId);
-            if (adminRepo.getRole().equals("admin")) {
-                cancelAll(chatId);
             } else sendNoPerms(bot, adminRepo);
             userDB.update("state", "none", chatId);
         })));
@@ -939,33 +933,6 @@ public class Stater {
                 });
             }
             bot.execute(new SendMessage(chatId, "Лимитные оредра успешно отменены"));
-        } catch (Exception e) {
-            System.out.println(e.getMessage());
-        }
-    }
-
-    private void cancelAll(String chatId) {
-        try {
-            for (UserEntity entity : userDB.getAll()) {
-                Thread.startVirtualThread(() -> {
-                    try {
-                        TradeService ts = entity.getUserBeerj();
-                        List<Position> poss = ts.getPositions(entity);
-                        poss.forEach(p -> ts.closePosition(entity, p));
-
-                        List<Order> ids = ts.getOrders(entity);
-                        ids.forEach(order -> {
-                            OrderResult e = ts.closeOrder(entity, order);
-                            if (e.succes()) {
-                                logger.info("Limit canceled");
-                            }
-                        });
-                    } catch (Exception e) {
-                        System.out.println(e.getMessage());
-                    }
-                });
-            }
-            bot.execute(new SendMessage(chatId, "Все позиция закрыты!"));
         } catch (Exception e) {
             System.out.println(e.getMessage());
         }

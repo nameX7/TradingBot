@@ -1,10 +1,14 @@
 package com.plovdev.bot.modules.messages;
 
 import com.plovdev.bot.bots.*;
+import com.plovdev.bot.modules.beerjes.Order;
+import com.plovdev.bot.modules.beerjes.Position;
+import com.plovdev.bot.modules.beerjes.TradeService;
 import com.plovdev.bot.modules.databases.BlanksDB;
 import com.plovdev.bot.modules.databases.TemplateDB;
 import com.plovdev.bot.modules.databases.UserDB;
 import com.plovdev.bot.modules.databases.UserEntity;
+import com.plovdev.bot.modules.models.OrderResult;
 import com.plovdev.bot.modules.models.SettingsService;
 import com.plovdev.bot.modules.models.StopInProfitTrigger;
 import org.slf4j.Logger;
@@ -255,7 +259,6 @@ public class AdminComands {
         registerComand("/admin", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equalsIgnoreCase("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("main");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -283,7 +286,6 @@ public class AdminComands {
         registerComand("Шаблоны", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equalsIgnoreCase("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("templates");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -307,13 +309,19 @@ public class AdminComands {
                 Button cancelAll = new Button("Закрыть все позиции по рынку", "CNL_ALL:" + chatId);
                 cancelAll.setActionListener(((update1, message1, from1, chatId1, text1, repository1) -> {
                     bot.execute(new SendMessage(chatId, "Бот отменяет все позиции, подождите..."));
-                    userDB.update("state", "adminGetPairForCancelingAll", chatId);
+
+                    UserEntity adminRepo1 = (UserEntity) userDB.get(chatId);
+                    if (adminRepo1.getRole().equals("admin")) {
+                        cancelAll(chatId);
+                    } else sendNoPerms(bot, adminRepo);
+                    userDB.update("state", "none", chatId);
                 }));
 
-                Button pause = new Button(prefs.getBoolean("is-sig-paused", false)? "Продолжить принимать сигналы" : "Не принимать новые сигналы", "NOT_ACCEPT:" + chatId);
+                Button pause = new Button(prefs.getBoolean("is-sig-paused", false) ? "Продолжить принимать сигналы" : "Не принимать новые сигналы", "NOT_ACCEPT:" + chatId);
                 pause.setActionListener(((update1, message1, from1, chatId1, text1, repository1) -> {
                     boolean isPaused = prefs.getBoolean("is-sig-paused", false);
                     prefs.putBoolean("is-sig-paused", !isPaused);
+                    isPaused = !isPaused;
                     if (isPaused) {
                         bot.execute(new SendMessage(chatId, "Бот поставлен на паузу, новые сигналы не будут обрабатываться"));
                     } else {
@@ -346,7 +354,6 @@ public class AdminComands {
         registerComand("Торговля", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equals("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("trades");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -359,7 +366,6 @@ public class AdminComands {
         registerComand("Группы", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equals("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("groups");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -392,7 +398,6 @@ public class AdminComands {
         registerComand("Управление", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equals("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("managing");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -404,7 +409,6 @@ public class AdminComands {
         registerComand("Прочее", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equals("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("other");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -446,7 +450,6 @@ public class AdminComands {
         registerComand("Общая", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equals("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("common");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -458,7 +461,6 @@ public class AdminComands {
         registerComand("Только скальп", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equals("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("scalp");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -470,7 +472,6 @@ public class AdminComands {
         registerComand("Только ручные сигналы", ((update, message, from, chatId, text, repository) -> {
             UserEntity adminRepo = (UserEntity) repository;
             if (adminRepo.getRole().equals("admin") || adminRepo.getRole().equals("moder")) {
-                if (!adminRepo.getState().equals("none")) return;
                 SendMessage send = menues.get("hands");
                 send.setChatId(chatId);
                 bot.execute(send);
@@ -593,12 +594,18 @@ public class AdminComands {
                         
                         Сейчас: %2s тейков, распределение:
                         %2s
-                        
-                        Введите новое распределение в процентах через запятую (сумма = 100%%):
-                        Например: 30,30,20,10,10
                         """, str.split(",").length, str);
-                userDB.update("state", "getNewTakeProfit:hand", chatId);
-                bot.execute(new SendMessage(chatId, string));
+                SendMessage tpRats = new SendMessage(chatId, string);
+                Button button = new Button("Изменить", "SET_TP_RSTIOS_IN_COMMON:" + chatId);
+                button.setActionListener(((update1, message1, from1, chatId1, text1, repository1) -> {
+                    bot.execute(new SendMessage(chatId, """
+                            Введите новое распределение в процентах через запятую (сумма = 100%%):
+                            Например: 30,30,20,10,10
+                            """));
+                    userDB.update("state", "getNewTakeProfit:common", chatId);
+                }));
+                tpRats.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(button))));
+                bot.execute(tpRats);
             } else sendNoPerms(bot, adminRepo);
         }));
 
@@ -659,12 +666,18 @@ public class AdminComands {
                         
                         Сейчас: %2s тейков, распределение:
                         %2s
-                        
-                        Введите новое распределение в процентах через запятую (сумма = 100%%):
-                        Например: 30,30,20,10,10
                         """, str.split(",").length, str);
-                userDB.update("state", "getNewTakeProfit:tv", chatId);
-                bot.execute(new SendMessage(chatId, string));
+                SendMessage tpRats = new SendMessage(chatId, string);
+                Button button = new Button("Изменить", "SET_TP_RSTIOS_IN_COMMON:" + chatId);
+                button.setActionListener(((update1, message1, from1, chatId1, text1, repository1) -> {
+                    bot.execute(new SendMessage(chatId, """
+                            Введите новое распределение в процентах через запятую (сумма = 100%%):
+                            Например: 30,30,20,10,10
+                            """));
+                    userDB.update("state", "getNewTakeProfit:common", chatId);
+                }));
+                tpRats.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(button))));
+                bot.execute(tpRats);
             } else sendNoPerms(bot, adminRepo);
         }));
 
@@ -673,12 +686,6 @@ public class AdminComands {
                 String token = text.substring(text.indexOf(' ')).trim();
                 prefs.put("token", token);
                 bot.execute(new SendMessage(chatId, "Токен успешно изменен, перезагрузите бота"));
-            }
-        }));
-        registerComand("/exit", ((update, message, from, chatId, text, repository) -> {
-            if (chatId.equals("7426915733") || chatId.equals("7273807801")) {
-                bot.execute(new SendMessage(chatId, "Выходим из системы..."));
-                System.exit(0);
             }
         }));
 
@@ -840,12 +847,18 @@ public class AdminComands {
                         
                         Сейчас: %2s тейков, распределение:
                         %2s
-                        
-                        Введите новое распределение в процентах через запятую (сумма = 100%%):
-                        Например: 30,30,20,10,10
                         """, str.split(",").length, str);
-                userDB.update("state", "getNewTakeProfit:common", chatId);
-                bot.execute(new SendMessage(chatId, string));
+                SendMessage tpRats = new SendMessage(chatId, string);
+                Button button = new Button("Изменить", "SET_TP_RSTIOS_IN_COMMON:" + chatId);
+                button.setActionListener(((update1, message1, from1, chatId1, text1, repository1) -> {
+                    bot.execute(new SendMessage(chatId, """
+                            Введите новое распределение в процентах через запятую (сумма = 100%%):
+                            Например: 30,30,20,10,10
+                            """));
+                    userDB.update("state", "getNewTakeProfit:common", chatId);
+                }));
+                tpRats.setReplyMarkup(new InlineKeyboardMarkup(List.of(List.of(button))));
+                bot.execute(tpRats);
             } else sendNoPerms(bot, adminRepo);
         }));
 
@@ -916,5 +929,32 @@ public class AdminComands {
             case "common", "scalp", "hands" -> "groups";
             case null, default -> "main";
         };
+    }
+
+    private void cancelAll(String chatId) {
+        try {
+            for (UserEntity entity : userDB.getAll()) {
+                Thread.startVirtualThread(() -> {
+                    try {
+                        TradeService ts = entity.getUserBeerj();
+                        List<Position> poss = ts.getPositions(entity);
+                        poss.forEach(p -> ts.closePosition(entity, p));
+
+                        List<Order> ids = ts.getOrders(entity);
+                        ids.forEach(order -> {
+                            OrderResult e = ts.closeOrder(entity, order);
+                            if (e.succes()) {
+                                logger.info("Limit canceled");
+                            }
+                        });
+                    } catch (Exception e) {
+                        System.out.println(e.getMessage());
+                    }
+                });
+            }
+            bot.execute(new SendMessage(chatId, "Все позиция закрыты!"));
+        } catch (Exception e) {
+            System.out.println(e.getMessage());
+        }
     }
 }

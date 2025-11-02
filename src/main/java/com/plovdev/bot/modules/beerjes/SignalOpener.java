@@ -92,12 +92,18 @@ public class SignalOpener {
             OrderResult result = OrderResult.no();
             try {
                 TradeService service = repository.getUserBeerj();
-                int all = service.getPositions(repository).size();
-                String positions = repository.getPositions();
-                if (positions.equals("all")) {
+                List<Position> positions = service.getPositions(repository);
+
+                int totalPositions = positions.size();
+                int maxPositions = repository.getPositions().equals("all")? Integer.MAX_VALUE : Integer.parseInt(repository.getPositions());
+                log.info("Total positions: {}, max positions: {}", totalPositions, maxPositions);
+
+                if (maxPositions == Integer.MAX_VALUE) {
                     if (service instanceof BitGetTradeService) {
+                        log.info("Open bitget order");
                         result = service.openOrder(signal, repository, bsi, bep);
                     } else {
+                        log.info("Open bitunix order");
                         result = service.openOrder(signal, repository, usi, uep);
                     }
                     System.out.println(result);
@@ -107,11 +113,28 @@ public class SignalOpener {
                     }
                 } else {
                     log.info("Open order for user");
-                    if ((Integer.parseInt(repository.getPositions()) - all) > 0) {
+                    int currentDifference = maxPositions - totalPositions;
+                    boolean canNext = currentDifference >= 0;
+                    log.info("Current difference: {}, canNext: {}", currentDifference, canNext);
+
+                    for (Position p : positions) {
+                        String posSide = p.getHoldSide().equalsIgnoreCase("LONG") || p.getHoldSide().equalsIgnoreCase("BUY")? "LONG" : "SHORT";
+                        log.info("PosSide: {}, SigSide: {}, Symbol: {}", posSide, signal.getDirection(), signal.getSymbol());
+                        if (signal.getSymbol().equals(p.getSymbol())) {
+                            if (!posSide.equalsIgnoreCase(signal.getDirection())) {
+                                log.info("Обнаружена противоположная позиция, переключаем позицию.");
+                                canNext = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (canNext) {
                         if (service instanceof BitGetTradeService) {
                             log.info("Open bitget order");
                             result = service.openOrder(signal, repository, bsi, bep);
                         } else {
+                            log.info("Open bitget order");
                             result = service.openOrder(signal, repository, usi, uep);
                         }
                         System.out.println(result);

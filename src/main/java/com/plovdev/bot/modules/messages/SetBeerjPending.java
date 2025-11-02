@@ -24,12 +24,12 @@ public class SetBeerjPending extends SendMessage {
         Button accept = getAccept(userId, bot);
 
 
-        Button reject = new Button("Отклонить", "PENDINGREJECT:" + userId);
+        Button reject = new Button("Отклонить", "SETPENDINGREJECT:" + userId);
 
         reject.setActionListener(((update, msg, from, chatId1, text1, repository) -> {
             if (blanksDB.getByKey("state", userId).equals("waiting")) {
                 UserEntity repo = (UserEntity) userDB.get(userId);
-                SendMessage message = new SendMessage(userId, manager.getText(repo.getLanguage(), "regErr"));
+                SendMessage message = new SendMessage(userId, manager.getText(repo.getLanguage(), "setBeerjErr"));
                 bot.execute(message);
 
                 EditMessageText et = new EditMessageText("Отклонение отправлено");
@@ -37,7 +37,7 @@ public class SetBeerjPending extends SendMessage {
                 et.setMessageId(update.getCallbackQuery().getMessage().getMessageId());
                 bot.execute(et);
 
-                blanksDB.upadateByKey("state", "getNewUidForSetBeerj:"+userId, userId);
+                userDB.update("state", "getNewUidForSetBeerj:"+userId, userId);
                 blanksDB.remove(userId);
             } else {
                 EditMessageText message = new EditMessageText("Заявка уже рассмотрена");
@@ -51,14 +51,14 @@ public class SetBeerjPending extends SendMessage {
     }
 
     private Button getAccept(String userId, TelegramLongPollingBot bot) {
-        Button accept = new Button("Принять", "PENDINGACCEPT:" + userId);
+        Button accept = new Button("Принять", "SETPENDINGACCEPT:" + userId);
         accept.setActionListener(((update, msg, from, chatId1, text1, repository) -> {
             String blankState = blanksDB.getByKey("state", userId);
 
             if (blankState.equals("waiting")) {
                 UserEntity repo = (UserEntity) userDB.get(userId);
 
-                SendMessage message = new SendMessage();
+                SendMessage message;
                 String beerj = "BitGet";
                 String phrase = "";
                 if (repo.getBeerj().equalsIgnoreCase("bitunix")) beerj = "BitUnix";

@@ -69,6 +69,9 @@ public class BitGetTradeService implements TradeService {
      */
     @Override
     public OrderResult openOrder(Signal sig, UserEntity user, SymbolInfo symbolInfo, BigDecimal entryPrice) throws Exception {
+        BitGetWS ws = new BitGetWS(user, security, this);
+
+
         printPart("OPEN ORDER");
         Signal signal = SignalCorrector.correct(sig, BeerjUtils.BITGET);
         custom.info(signal.toString());
@@ -114,6 +117,11 @@ public class BitGetTradeService implements TradeService {
         BigDecimal totalSize = setSize(symbolInfo, positionSize.multiply(oneOrderSize).setScale(symbolInfo.getVolumePlace(), RoundingMode.HALF_EVEN));
         custom.warn("Total size before scaling: {}", totalSize);
 
+        logger.info("Starting position monitor...");
+        startPositionMonitor(user, symbol, signal, totalSize, ws, totalSize, symbolInfo, oec);
+        ws.waitForAuthentication();
+        logger.info("Position monitor started.");
+
 
         logger.info("Getting variable values: positionSize: {}, leverage: {}, direction: {}, types size: {}, types: {}", positionSize, leverage, direction, types.size(), types);
         logger.info("One order size: {}, totalSize: {}\n\n", oneOrderSize, totalSize);
@@ -149,7 +157,6 @@ public class BitGetTradeService implements TradeService {
             }
         }
 
-        BitGetWS ws = new BitGetWS(user, security, this);
         if (types.contains("market")) {
             List<Position> positions = getPositions(user).stream().filter(p -> p.getSymbol().equals(symbol)).toList();
             if (!positions.isEmpty()) {
@@ -169,10 +176,6 @@ public class BitGetTradeService implements TradeService {
         long totalTimeMillis = endTimeOpening - startTimeOpening;
         long totalTimeSecs = (endTimeOpening - startTimeOpening) / 1000;
         logger.info("TOTALS: Order opened for {}ms({}s)", totalTimeMillis, totalTimeSecs);
-
-        logger.info("Starting position monitor...");
-        startPositionMonitor(user, symbol, signal, totalSize, ws, totalSize, symbolInfo, oec);
-        logger.info("Position monitor started.");
 
         return OrderResult.ok("Position placed, userId: " + user.getTgId() + ", tgName: " + user.getTgName(), results.getFirst().id(), symbol);
     }
@@ -788,7 +791,7 @@ public class BitGetTradeService implements TradeService {
             tpLevels.forEach(l -> logger.info("Level: {}", l));
 
             System.out.println("Setuping tp... stop loss id: " + context.getStopLossId());
-            setuper.manageTakesInMonitor(ws, symbol, user, setuper.placeTakes(positionSize, tpLevels, symbol, direction), context.getStopLossId(), tpLevels, symbolInfo, positionSize, direction);
+            setuper.manageTakesInMonitor(ws, symbol, user, setuper.placeTakes(positionSize, tpLevels, symbol, direction), context.getStopLossId(), tpLevels, symbolInfo, positionSize, direction, signal);
         } catch (Exception e) {
             logger.error("Critical error in setupTP for user {}: {}", user.getTgId(), e.getMessage(), e);
         }
@@ -1152,5 +1155,31 @@ public class BitGetTradeService implements TradeService {
         } catch (Exception e) {
             logger.error("Margin mode changed success {}: {}", symbol, e.getMessage());
         }
+    }
+
+    @Override
+    public Ticker getTicker(String symbol) {
+        Request request = new Request.Builder()
+                .url("https://api.bitget.com/api/v2/mix/market/ticker?productType=USDT-FUTURES&symbol="+symbol)
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            String responseBody = Objects.requireNonNull(response.body()).string();
+
+            JSONObject ret = new JSONObject(responseBody);
+            JSONArray data = ret.getJSONArray("data");
+
+            if (!data.isEmpty()) {
+                JSONObject ticker = data.getJSONObject(0);
+                return new Ticker(ticker.getString("symbol"), new BigDecimal(ticker.optString("lastPr", "0.0")), new BigDecimal(ticker.optString("markPrice", "0.0")));
+            }
+        } catch (Exception e) {
+            logger.error("ERR ", e);
+        }
+
+        Ticker ticker = new Ticker();
+        ticker.setSymbol(symbol);
+
+        return ticker;
     }
 }

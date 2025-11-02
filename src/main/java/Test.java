@@ -1,5 +1,6 @@
 import com.plovdev.bot.modules.beerjes.TakeProfitLevel;
 import com.plovdev.bot.modules.beerjes.utils.BeerjUtils;
+import com.plovdev.bot.modules.beerjes.utils.StopLossCorrector;
 import com.plovdev.bot.modules.models.SymbolInfo;
 import com.plovdev.bot.modules.parsers.Signal;
 
@@ -12,7 +13,9 @@ import static com.plovdev.bot.main.TestUtils.bitunixUser;
 
 public class Test {
     public static void main(String[] args) throws Exception {
-        new BigDecimal("-0.5");
+        System.out.println(bitunixService.getEntryPrice("DOGEUSDT"));
+        StopLossCorrector corrector = new StopLossCorrector(bitunixService);
+        System.out.println(corrector.correct(new BigDecimal("0.2111"), "DOGEUSDT", "LONG", bitunixService.getSymbolInfo(bitunixUser, "DOGEUSDT")));
     }
     private static void open() throws Exception {
         String symbol = "DOGEUSDT";
@@ -32,21 +35,21 @@ public class Test {
         bitunixService.openOrder(signal, bitunixUser, bitunixService.getSymbolInfo(bitunixUser, symbol), bitunixService.getEntryPrice(symbol));
     }
     private static void testTakes() {
-        List<BigDecimal> ratios = List.of(new BigDecimal("60"), new BigDecimal("10"), new BigDecimal("10"), new BigDecimal("10"), new BigDecimal("10"));
+        List<BigDecimal> ratios = List.of(new BigDecimal("80"), new BigDecimal("10"), new BigDecimal("5"), new BigDecimal("5"));
 
-        String symbol = "DOGEUSDT";
+        String symbol = "AEROUSDT";
         BigDecimal price = bitunixService.getEntryPrice(symbol);
 
         Signal signal = new Signal();
         signal.setPriority(80);
         signal.setSrc("TV");
         signal.setLimitEntryPrice(null);
-        signal.setTargets(List.of(new BigDecimal("0.20035"), new BigDecimal("0.2004"), new BigDecimal("0.20045"), new BigDecimal("0.2005")));
+        signal.setTargets(List.of(new BigDecimal("1.051344"), new BigDecimal("1.0534896"), new BigDecimal("1.06207199"), new BigDecimal("1.061436")));
         signal.setSymbol(symbol);
-        signal.setDirection("LONG");
+        signal.setDirection("SHORT");
         signal.setTypeOreder(List.of("market"));
         signal.setEntryPrice(null);
-        signal.setStopLoss("0.195");
+        signal.setStopLoss("1.104984");
         signal.setType("tv");
 
         SymbolInfo info = bitunixService.getSymbolInfo(bitunixUser, symbol);
