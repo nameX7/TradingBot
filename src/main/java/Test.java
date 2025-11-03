@@ -1,11 +1,12 @@
 import com.plovdev.bot.modules.beerjes.TakeProfitLevel;
 import com.plovdev.bot.modules.beerjes.utils.BeerjUtils;
-import com.plovdev.bot.modules.beerjes.utils.StopLossCorrector;
+import com.plovdev.bot.modules.models.EnterPoint;
 import com.plovdev.bot.modules.models.SymbolInfo;
 import com.plovdev.bot.modules.parsers.Signal;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.ArrayList;
 import java.util.List;
 
 import static com.plovdev.bot.main.TestUtils.bitunixService;
@@ -13,9 +14,7 @@ import static com.plovdev.bot.main.TestUtils.bitunixUser;
 
 public class Test {
     public static void main(String[] args) throws Exception {
-        System.out.println(bitunixService.getEntryPrice("DOGEUSDT"));
-        StopLossCorrector corrector = new StopLossCorrector(bitunixService);
-        System.out.println(corrector.correct(new BigDecimal("0.2111"), "DOGEUSDT", "LONG", bitunixService.getSymbolInfo(bitunixUser, "DOGEUSDT")));
+        List<EnterPoint> enterPoints = new ArrayList<>();
     }
     private static void open() throws Exception {
         String symbol = "DOGEUSDT";

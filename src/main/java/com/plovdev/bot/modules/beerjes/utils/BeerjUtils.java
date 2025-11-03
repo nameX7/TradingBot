@@ -4,6 +4,7 @@ import com.plovdev.bot.modules.beerjes.TakeProfitLevel;
 import com.plovdev.bot.modules.beerjes.TradeService;
 import com.plovdev.bot.modules.databases.UserEntity;
 import com.plovdev.bot.modules.exceptions.InvalidParametresException;
+import com.plovdev.bot.modules.models.EnterPoint;
 import com.plovdev.bot.modules.models.OrderResult;
 import com.plovdev.bot.modules.models.SettingsService;
 import com.plovdev.bot.modules.models.SymbolInfo;
@@ -491,6 +492,33 @@ public class BeerjUtils {
         boolean isMultiple = value.remainder(divisor).compareTo(BigDecimal.ZERO) == 0;
         logger.info("Is multiple? - {}", isMultiple);
         return isMultiple;
+    }
+
+    public static List<EnterPoint> mergePoints(List<EnterPoint> levels, SymbolInfo info, BigDecimal total) {
+        List<EnterPoint> result = new ArrayList<>(levels); // работаем с копией
+        BigDecimal minTradeNum = info.getMinTradeNum();
+        logger.info("Start merge");
+
+        for (int i = result.size() - 1; i >= 0; i--) { // идём с конца
+            EnterPoint currentLevel = result.get(i);
+            logger.info("Level: {}, min trade num: {}", currentLevel, minTradeNum);
+            if (currentLevel.getSize().compareTo(minTradeNum) < 0) { // если размер < min
+                if (i > 0) { // если есть предыдущий элемент
+                    EnterPoint prevLevel = result.get(i - 1);
+                    prevLevel.setSize(prevLevel.getSize().add(currentLevel.getSize())); // прибавляем к предыдущему
+                    logger.info("Merged small level (size {}) to previous level (new size: {})", currentLevel.getSize(), prevLevel.getSize());
+                }
+                // Удаляем текущий уровень, т.к. он < minTradeNum
+                result.remove(i);
+            }
+        }
+        if (result.isEmpty()) {
+            EnterPoint point = levels.getFirst();
+            point.setSize(total);
+            result.add(point);
+        }
+
+        return result;
     }
 
     public static BigDecimal getPosSize(UserEntity user, Signal signal, TradeService service, BigDecimal entryPrice) {

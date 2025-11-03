@@ -22,13 +22,13 @@ public class StopLossCorrector {
         if (side.equalsIgnoreCase("LONG") || side.equalsIgnoreCase("BUY")) {
             BigDecimal minimum = mark.min(last);
             if (stop.compareTo(minimum) >= 0) {
-                BigDecimal percent = BeerjUtils.getPercent(new BigDecimal("0.3"), minimum);
+                BigDecimal percent = BeerjUtils.getPercent(new BigDecimal("0.1"), minimum);
                 stop = minimum.subtract(percent);
             }
         } else {
             BigDecimal maximum = mark.max(last);
             if (stop.compareTo(maximum) <= 0) {
-                BigDecimal percent = BeerjUtils.getPercent(new BigDecimal("0.3"), maximum);
+                BigDecimal percent = BeerjUtils.getPercent(new BigDecimal("0.1"), maximum);
                 stop = maximum.add(percent);
             }
         }

@@ -23,6 +23,7 @@ import com.plovdev.bot.modules.logging.Colors;
 import com.plovdev.bot.modules.models.*;
 import com.plovdev.bot.modules.parsers.Signal;
 import com.plovdev.bot.modules.parsers.SignalCorrector;
+import javassist.compiler.ast.Symbol;
 import okhttp3.*;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -125,8 +126,8 @@ public class BitUnixTradeService implements TradeService {
         BigDecimal positionSize = posSize.multiply(leverage);
 
         List<String> types = signal.getTypeOreder();
-        BigDecimal oneOrderSize = (new BigDecimal("100.0").divide(BigDecimal.valueOf(types.size()), symbolInfo.getPricePlace(), RoundingMode.HALF_EVEN)).divide(new BigDecimal("100.0"), 2, RoundingMode.HALF_EVEN);
-        BigDecimal totalSize = setSize(symbolInfo, positionSize.multiply(oneOrderSize).setScale(symbolInfo.getVolumePlace(), RoundingMode.HALF_EVEN));
+        BigDecimal oneOrderSize = (new BigDecimal("100.0").divide(BigDecimal.valueOf(types.size()), 2, RoundingMode.HALF_EVEN)).divide(new BigDecimal("100.0"), 2, RoundingMode.HALF_EVEN);
+        BigDecimal totalSize = setSize(symbolInfo, positionSize.multiply(oneOrderSize).setScale(symbolInfo.getVolumePlace(), RoundingMode.HALF_UP));
         custom.warn("Total size before scaling: {}", totalSize);
 
         if (ws != null) {
@@ -148,18 +149,30 @@ public class BitUnixTradeService implements TradeService {
         logger.info("One order size: {}, totalSize: {}\n\n", oneOrderSize, totalSize);
 
         logger.info("Put orders payload.");
+
+        List<EnterPoint> points = new ArrayList<>();
         List<Map<String, String>> ordersPayload = new ArrayList<>();
         if (types.contains("market")) {
-            ordersPayload.add(opener.placeOrder(symbol, direction, totalSize, "MARKET", null, signal.getStopLoss()));
+            points.add(new EnterPoint("MARKET", null, totalSize));
             logger.info("Added market order to payload.");
         }
 
         if (types.size() > 1 || !types.contains("market")) {
             BigDecimal totalMargin = BigDecimal.ZERO;
             for (int i = types.contains("market") ? 1 : 0; i < types.size(); i++) {
-                ordersPayload.add(opener.placeOrder(symbol, direction, totalSize, "LIMIT", new BigDecimal(types.get(i)), signal.getStopLoss()));
+                points.add(new EnterPoint("LIMIT", new BigDecimal(types.get(i)), totalSize));
                 logger.info("Added limit order to payload.");
             }
+        }
+
+        points = BeerjUtils.mergePoints(points, symbolInfo, positionSize);
+        oneOrderSize = (new BigDecimal("100.0").divide(BigDecimal.valueOf(points.size()), 2, RoundingMode.HALF_EVEN)).divide(new BigDecimal("100.0"), 2, RoundingMode.HALF_EVEN);
+        totalSize = setSize(symbolInfo, positionSize.multiply(oneOrderSize).setScale(symbolInfo.getVolumePlace(), RoundingMode.HALF_EVEN));
+
+
+        for (EnterPoint point : points) {
+            ordersPayload.add(opener.placeOrder(symbol, direction, point.getSize(), point.getType(), point.getPrice(), signal.getStopLoss()));
+            logger.info("Added order to payload.");
         }
 
         logger.info("Batch orders payload formed: {}", ordersPayload);
@@ -171,52 +184,16 @@ public class BitUnixTradeService implements TradeService {
         }
 
         if (types.contains("market")) {
-            Utils.sleep(1100);
-            List<Position> positions = getPositions(user).stream().filter(p -> {
-                System.out.println("Pos symbol: " + p.getSymbol() + ", our symbol: " + symbol);
-                return p.getSymbol().equalsIgnoreCase(symbol);
-            }).toList();
-
-            if (!positions.isEmpty()) {
-                Position position = positions.getFirst();
-                String posId = position.getPosId();
-
-                OrderResult stopLossResult = placeStopLoss(user, position, signal.getStopLoss(), symbolInfo, oec);
-                custom.info("Setuped sl: {}", stopLossResult.id());
-                if (!stopLossResult.succes()) {
-                    String newStop = stopLossCorrector.correct(new BigDecimal(signal.getStopLoss()), symbol, direction, symbolInfo).toPlainString();
-                    OrderResult stopLossResultAgain = placeStopLoss(user, position, newStop, symbolInfo, oec);
-                    custom.info("Again setuped sl: {}", stopLossResultAgain.id());
-                    if (stopLossResultAgain.succes()) {
-                        logger.info("Position stop-loss placed success after retry");
-                    } else {
-                        logger.warn("Position stop-loss not placed. Retry was. Sl not placed((");
-                    }
-                } else {
-                    logger.info("Position stop-loss placed success");
-                }
-
-                OrderResult takResult = setupTP(signal, user, totalSize, new BigDecimal(signal.getStopLoss()), posId, totalSize, symbolInfo, ws, oec);
-                custom.info("Setuped tp");
-                if (!takResult.succes()) {
-                    Utils.sleep(1000);
-                    OrderResult takResultAgain = setupTP(signal, user, totalSize, new BigDecimal(signal.getStopLoss()), posId, totalSize, symbolInfo, ws, oec);
-                    custom.info("Again setuped tp");
-                    if (takResultAgain.succes()) {
-                        logger.info("Position takes placed success after retry");
-                    } else {
-                        logger.warn("Position takes not placed. Retry was. Takes not placed((");
-                    }
-                } else {
-                    logger.info("Position takes placed success");
-                }
-
-                oec.setPositioned(true);
-            } else {
-                logger.warn("Position for place takes and stop not found. User: {}", user.getTgName());
-            }
+            setupTPSL(user, signal, symbol, symbolInfo, direction, oec, totalSize, ws);
         } else {
             logger.info("Signal for {}, {} haven't merket orders. User: {}", symbol, direction, user.getTgName());
+            if (!oec.isPositioned()) {
+                BigDecimal entryPriceNow = getEntryPrice(symbol);
+                boolean isNeedSetupTPLS = direction.equalsIgnoreCase("long") ? entryPriceNow.compareTo(points.getFirst().getPrice()) <= 0 : entryPriceNow.compareTo(points.getFirst().getPrice()) >= 0;
+                if (isNeedSetupTPLS) {
+                    setupTPSL(user, signal, symbol, symbolInfo, direction, oec, totalSize, ws);
+                }
+            }
         }
 
         long endTimeOpening = System.currentTimeMillis();
@@ -236,6 +213,53 @@ public class BitUnixTradeService implements TradeService {
             }
         }
         return totalSize;
+    }
+
+    private void setupTPSL(UserEntity user, Signal signal, String symbol, SymbolInfo symbolInfo, String direction, OrderExecutionContext oec, BigDecimal totalSize, BitUnixWS ws) {
+        Utils.sleep(1100);
+        List<Position> positions = getPositions(user).stream().filter(p -> {
+            System.out.println("Pos symbol: " + p.getSymbol() + ", our symbol: " + symbol);
+            return p.getSymbol().equalsIgnoreCase(symbol);
+        }).toList();
+
+        if (!positions.isEmpty()) {
+            Position position = positions.getFirst();
+            String posId = position.getPosId();
+
+            OrderResult stopLossResult = placeStopLoss(user, position, signal.getStopLoss(), symbolInfo, oec);
+            custom.info("Setuped sl: {}", stopLossResult.id());
+            if (!stopLossResult.succes()) {
+                String newStop = stopLossCorrector.correct(new BigDecimal(signal.getStopLoss()), symbol, direction, symbolInfo).toPlainString();
+                OrderResult stopLossResultAgain = placeStopLoss(user, position, newStop, symbolInfo, oec);
+                custom.info("Again setuped sl: {}", stopLossResultAgain.id());
+                if (stopLossResultAgain.succes()) {
+                    logger.info("Position stop-loss placed success after retry");
+                } else {
+                    logger.warn("Position stop-loss not placed. Retry was. Sl not placed((");
+                }
+            } else {
+                logger.info("Position stop-loss placed success");
+            }
+
+            OrderResult takResult = setupTP(signal, user, totalSize, new BigDecimal(signal.getStopLoss()), posId, totalSize, symbolInfo, ws, oec);
+            custom.info("Setuped tp");
+            if (!takResult.succes()) {
+                Utils.sleep(1000);
+                OrderResult takResultAgain = setupTP(signal, user, totalSize, new BigDecimal(signal.getStopLoss()), posId, totalSize, symbolInfo, ws, oec);
+                custom.info("Again setuped tp");
+                if (takResultAgain.succes()) {
+                    logger.info("Position takes placed success after retry");
+                } else {
+                    logger.warn("Position takes not placed. Retry was. Takes not placed((");
+                }
+            } else {
+                logger.info("Position takes placed success");
+            }
+
+            oec.setPositioned(true);
+        } else {
+            logger.warn("Position for place takes and stop not found. User: {}", user.getTgName());
+        }
     }
 
     public OrderResult updateStopLoss(UserEntity user, String positionId, String pair, BigDecimal newStop) {

@@ -187,7 +187,6 @@ public class BitUnixTakesSetuper {
                                     System.out.println("Again place stop order: " + stopOrderAgain);
                                 }
                             }
-                            isOrdered.setT(true);
                         } catch (Exception e) {
                             logger.info("Fisrt TP hit error: ", e);
                         }
